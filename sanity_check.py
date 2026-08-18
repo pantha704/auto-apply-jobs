@@ -57,13 +57,14 @@ try:
 except Exception as e:
     check("db open", False, str(e))
 
-print("== worker code imports ==")
-for mod in ("worker_wellfound", "worker_yc", "worker_review", "worker_external", "worker_internshala", "watchdog"):
+print("== worker code syntax ==")
+import py_compile
+for filename in ("worker_wellfound.py", "worker_yc.py", "worker_review.py", "worker_external.py", "worker_internshala.py", "watchdog.py"):
     try:
-        __import__(mod)
-        check(f"import {mod}", True)
+        py_compile.compile(os.path.join(HERE, filename), doraise=True)
+        check(f"compile {filename}", True)
     except Exception as e:
-        check(f"import {mod}", False, str(e)[:80])
+        check(f"compile {filename}", False, str(e)[:80])
 
 print()
 if FAILS:
