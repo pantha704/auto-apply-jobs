@@ -1,0 +1,10 @@
+# Copy to profile_local.py and fill in. profile_local.py is gitignored.
+NAME = "Your Name"
+EMAIL = "you@example.com"
+PHONE = "0000000000"
+ADDRESS = ""
+CITY = ""
+STATE = ""
+PIN = ""
+COLLEGE = ""
+DEGREE = ""

@@ -1,0 +1,18 @@
+[Unit]
+Description=Jobhunt Internshala worker %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Environment=TMPDIR=/home/ubuntu/tmp_chrome
+WorkingDirectory=/home/ubuntu/job_hunt_linkedin
+ExecStart=/home/ubuntu/jobhunt-venv/bin/python /home/ubuntu/job_hunt_linkedin/worker_internshala.py %i
+Restart=on-failure
+RestartSec=30
+# cap daily applies per worker
+Environment=IS_DAILY_CAP=40
+
+[Install]
+WantedBy=multi-user.target
