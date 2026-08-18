@@ -196,13 +196,15 @@ def _apply_one(url):
                 page.get_by_role("button", name=re.compile("^Apply Now$", re.I)).first.wait_for(state="visible", timeout=8000)
             except Exception:
                 pass
-            # open apply dialog (try button, then autoOpen URL)
+            # open apply dialog (intent map first, then Apply Now, then autoOpen URL)
             dialog_open = False
             for attempt in range(3):
                 try:
-                    b = page.get_by_role("button", name=re.compile("^Apply Now$", re.I)).first
-                    b.scroll_into_view_if_needed(timeout=3000)
-                    b.click(timeout=4000)
+                    import dynamic_ui
+                    if not dynamic_ui.click(page, "wellfound", "apply"):
+                        b = page.get_by_role("button", name=re.compile("^Apply Now$", re.I)).first
+                        b.scroll_into_view_if_needed(timeout=3000)
+                        b.click(timeout=4000)
                     try:
                         page.locator(APPLY_DIALOG).first.wait_for(state="visible", timeout=6000)
                     except Exception:

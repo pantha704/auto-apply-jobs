@@ -6,6 +6,7 @@
       { "css": "#truste-consent-required" }
     ],
     "apply": [
+      { "role": "button", "name": "Apply Now" },
       { "role": "button", "name": "Apply" }
     ],
     "submit": [

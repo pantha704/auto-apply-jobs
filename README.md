@@ -165,13 +165,18 @@ Naukri is parked (Akamai from datacenter IPs).
 
 ---
 
-## Docs
+## Docs (feed these to any agent)
 
-| File | For |
-|---|---|
-| [docs/AGENT_LOOP.md](docs/AGENT_LOOP.md) | **How an agent runs and repairs this farm** |
-| [learned/selectors.example.json](learned/selectors.example.json) | Intent map shape |
-| `.env.example` / `profile_local.example.py` | Secrets stay local |
+1. **[docs/AGENT_INSTRUCTIONS.md](docs/AGENT_INSTRUCTIONS.md)** — paste this first  
+2. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — every component  
+3. **[docs/AGENT_LOOP.md](docs/AGENT_LOOP.md)** — UI repair tick  
+4. GitNexus: `node .gitnexus/run.cjs analyze` then `query` / `impact` / `context`
+
+Optional cheap UI brain: set `GROQ_API_KEY`. `dynamic_ui` will ask Groq
+`llama-3.1-8b-instant` (~$0.05/$0.08 per M tokens) **only** to pick a visible
+control when the intent map misses. Hits are written back to
+`learned/selectors.json`. Never used for form answers. `UI_LLM=0` disables it.
+Any OpenAI-compatible endpoint works (`UI_LLM_BASE` + `UI_LLM_API_KEY`).
 
 ---
 
