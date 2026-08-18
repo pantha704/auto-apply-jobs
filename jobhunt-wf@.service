@@ -1,18 +1,18 @@
 [Unit]
 Description=Job hunt Wellfound worker %i
 After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/job_hunt_linkedin
+EnvironmentFile=-/etc/jobhunt/job-hunt.env
 Environment=TMPDIR=/home/ubuntu/tmp_chrome
-Environment=WF_PASSWORD_FILE=/home/ubuntu/job_hunt_linkedin/wf_password.txt
 ExecStartPre=/bin/bash /home/ubuntu/job_hunt_linkedin/reset_claims.sh wf-%i wellfound
-ExecStart=/bin/bash -c 'export WF_PASSWORD="$(cat /home/ubuntu/job_hunt_linkedin/wf_password.txt 2>/dev/null)"; exec /home/ubuntu/jobhunt-venv/bin/python /home/ubuntu/job_hunt_linkedin/worker_wellfound.py wf-%i'
+ExecStart=/home/ubuntu/jobhunt-venv/bin/python /home/ubuntu/job_hunt_linkedin/worker_wellfound.py wf-%i
 Restart=always
 RestartSec=15
-StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target

@@ -1,17 +1,18 @@
 [Unit]
 Description=Job hunt LinkedIn worker %i
 After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/job_hunt_linkedin
+EnvironmentFile=-/etc/jobhunt/job-hunt.env
 Environment=TMPDIR=/home/ubuntu/tmp_chrome
 ExecStartPre=/bin/bash /home/ubuntu/job_hunt_linkedin/reset_claims.sh li-%i linkedin
 ExecStart=/home/ubuntu/jobhunt-venv/bin/python /home/ubuntu/job_hunt_linkedin/worker_linkedin.py li-%i
 Restart=always
 RestartSec=15
-StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target

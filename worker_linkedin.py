@@ -6,6 +6,7 @@ import json, os, re, sqlite3, sys, time
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 from playwright.sync_api import sync_playwright
 import audit
+import dynamic_ui
 from worker_guard import BrowserWatchdog
 import profile as ident
 
@@ -227,20 +228,13 @@ def apply_job(url):
                     return (False, "external-or-closed")
                 return (False, "no-easy-apply")
 
-            modal_open = False
-            for attempt in range(3):
-                try:
-                    btn = page.locator("button:has-text('Easy Apply')").first
-                    btn.scroll_into_view_if_needed(timeout=3000)
-                    btn.click(timeout=4000)
-                    page.wait_for_timeout(2000)
-                except Exception:
-                    pass
-                modal_open = "Apply to" in page.inner_text("body")[:600] or "Contact info" in page.inner_text("body")[:600]
-                if modal_open:
-                    break
-            if not modal_open:
-                return (False, "modal-not-opened")
+            try:
+                if not dynamic_ui.click(page, "linkedin", "easy_apply", timeout_ms=12000):
+                    return (False, "no-easy-apply")
+                page.wait_for_timeout(2000)
+            except Exception:
+                return (False, "easy-apply-intent-failed")
+            modal_open = "Apply to" in page.inner_text("body")[:600] or "Contact info" in page.inner_text("body")[:600]
             # single-page form detection: Submit application present, no Next
             has_submit = page.locator("button:has-text('Submit application')").count() > 0
             has_next = page.locator("button:has-text('Next')").count() > 0
@@ -258,7 +252,8 @@ def apply_job(url):
                     audit.snapshot(page, "linkedin", url, "before")
                 except Exception:
                     pass
-                click_any(page, ["^Submit application$"])
+                if not dynamic_ui.click(page, "linkedin", "submit", timeout_ms=8000):
+                    return (False, "submit-intent-failed")
                 page.wait_for_timeout(3500)
                 try:
                     audit.snapshot(page, "linkedin", url, "after")

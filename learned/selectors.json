@@ -29,9 +29,13 @@
     ]
   },
   "internshala": {
-    "apply": [
-      { "role": "button", "name": "Apply now" }
-    ],
+  "apply": [
+    { "role": "button", "name": "Apply now" }
+  ],
+  "proceed": [
+    { "role": "link", "name": "Proceed to application" },
+    { "role": "button", "name": "Proceed to application" }
+  ],
     "submit": [
       { "role": "button", "name": "Submit" }
     ]
@@ -45,8 +49,19 @@
     ]
   },
   "himalayas": {
-    "apply": [
-      { "role": "button", "name": "Apply" }
+  "apply": [
+    { "role": "button", "name": "Apply" }
+  ],
+  "dismiss_upsell": [
+    { "role": "button", "name": "Don't show this again" }
+  ],
+  "ready": [
+    { "role": "button", "name": "I'm ready to apply" }
+  ],
+    "submit": [
+      { "role": "button", "name": "Send application" },
+      { "role": "button", "name": "Submit application" },
+      { "role": "button", "name": "Submit" }
     ]
   },
   "weworkremotely": {

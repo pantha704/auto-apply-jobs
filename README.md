@@ -39,10 +39,12 @@ Humans set identity + sessions. Agents run, watch, and repair.
 | Need | Notes |
 |---|---|
 | Linux | headless VPS is fine |
-| Python 3.11+ | venv |
-| Playwright + Chromium or CloakBrowser | stealth Chromium preferred |
-| An **agent** | Hermes, Claude Code, Codex, OpenCode, or any tool-using LLM that can read screenshots + edit files |
-| Optional | systemd, 5‑min watchdog cron |
+| Python 3.11+ | venv + `pip install playwright` (**driver only**) |
+| **CloakBrowser non-pro** | Binary at `~/.cloakbrowser/chromium-<ver>/chrome`. **Not** stock Chromium. |
+| Playwright Python | Wires to Cloak via `executable_path=CLOAK`. Do **not** `playwright install chromium`. |
+| Agent MCPs | CloakBrowser MCP (`npx -y cloakbrowser-mcp@latest`) **and** Playwright MCP (`browser_*` / `playwright-mcp`) |
+| An **agent** | Hermes, Claude Code, Codex, OpenCode — must read docs/AGENT_INSTRUCTIONS.md |
+| Optional | systemd, 5‑min watchdog cron, `GROQ_API_KEY` |
 
 **Never in git:** `profile_local.py`, `.env`, cookies (`portal_*.json`, `profiles/`), DBs, resumes, passwords.
 
@@ -55,9 +57,18 @@ git clone https://github.com/pantha704/auto-apply-jobs.git
 cd auto-apply-jobs
 python3 -m venv .venv
 source .venv/bin/activate
-pip install playwright
-playwright install chromium
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+# Do not run `playwright install`; CloakBrowser supplies the executable.
+# Install CloakBrowser non-pro, then:
+export CLOAK="$HOME/.cloakbrowser/chromium-<version>/chrome"
+# Agent host: enable CloakBrowser MCP AND Playwright MCP
+
+# Pure public-clone verification (no live profile, cookies, queue, or portal):
+python -m pytest -q
+python -m compileall -q .
 ```
+See [docs/STACK.md](docs/STACK.md) for the exact browser stack.
 
 ---
 

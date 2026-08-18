@@ -7,8 +7,10 @@ so the job can be marked needs-agent:<intent> instead of a wrong click.
 """
 from __future__ import annotations
 
-import json, os, re, time
-from typing import Any
+import json, os, re, tempfile, time
+from pathlib import Path
+from threading import Lock
+from typing import Any, Callable
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LEARNED = os.path.join(HERE, "learned", "selectors.json")
@@ -16,12 +18,121 @@ EXAMPLE = os.path.join(HERE, "learned", "selectors.example.json")
 INBOX = os.path.join(HERE, "learned", "agent_inbox")
 
 
+_WRITE_LOCK = Lock()
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\d ()-]{8,}\d)(?!\d)")
+_TOKEN_RE = re.compile(r"(?i)(?:bearer\s+|token[=:]\s*|cookie[=:]\s*)[^\s,;]+")
+
+
+def _redact(value: Any) -> str:
+    text = str(value or "")
+    text = _EMAIL_RE.sub("[REDACTED_EMAIL]", text)
+    text = _PHONE_RE.sub("[REDACTED_PHONE]", text)
+    text = _TOKEN_RE.sub("[REDACTED_TOKEN]", text)
+    return text[:120]
+
+
+def sanitize_controls(controls: list[dict]) -> list[dict]:
+    """Return only safe, actionable metadata; never serialize form values."""
+    allowed = {"button", "link", "checkbox", "radio", "tab", "combobox", "menuitem"}
+    safe: list[dict] = []
+    for index, item in enumerate(controls or []):
+        role = str(item.get("role") or "").lower()
+        if role not in allowed:
+            continue
+        name = _redact(item.get("name"))
+        if not name:
+            continue
+        safe.append({
+            "id": str(item.get("id") or f"c{index}"),
+            "role": role,
+            "name": name,
+            "testid": _redact(item.get("testid")),
+        })
+    return safe[:80]
+
+
+def validate_candidate(candidate: dict, controls: list[dict]) -> dict:
+    """Resolve a model candidate only against the supplied inventory."""
+    if not isinstance(candidate, dict) or set(candidate) != {"candidate_id"}:
+        raise ValueError("candidate must contain only candidate_id")
+    candidate_id = candidate.get("candidate_id")
+    for control in controls:
+        if control.get("id") == candidate_id:
+            return control
+    raise ValueError("unknown candidate_id")
+
+
+def validate_action_candidate(candidate: dict, controls: list[dict], *, intent: str, source: str) -> dict:
+    if intent in {"submit", "send"} and source == "llm":
+        raise ValueError("LLM cannot choose a submit/send control")
+    return validate_candidate(candidate, controls)
+
+
+def _atomic_json_write(path: str, data: dict) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".selectors.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, target)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def remember_after_verified(portal: str, intent: str, spec: dict, *, verified: bool) -> bool:
+    """Persist learning only after an observed postcondition."""
+    if not verified or not isinstance(spec, dict):
+        return False
+    if spec.get("source") not in {"human", "agent"}:
+        return False
+    with _WRITE_LOCK:
+        data = _load()
+        bucket = data.setdefault(portal, {}).setdefault(intent, [])
+        if spec not in bucket:
+            bucket.insert(0, spec)
+            _atomic_json_write(LEARNED, data)
+    return True
+
+
+def llm_pick_candidate(controls: list[dict], portal: str, intent: str, transport: Callable) -> dict:
+    """Ask an OpenAI-compatible model for a candidate ID, never a selector."""
+    safe = sanitize_controls(controls)
+    if not safe:
+        return {"none": True}
+    body = {
+        "model": os.environ.get("UI_LLM_MODEL", "llama-3.1-8b-instant"),
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content":
+             "Choose one candidate_id for the requested low-risk UI intent. "
+             "Return only {candidate_id} or {none:true}. Never return CSS, XPath, "
+             "text, answers, or any other fields."},
+            {"role": "user", "content": json.dumps({
+                "portal": portal, "intent": intent, "controls": safe
+            })},
+        ],
+    }
+    result = transport(body)
+    if not isinstance(result, dict) or result.get("none"):
+        return {"none": True}
+    return {"candidate_id": result.get("candidate_id")}
+
+
+
 def _load() -> dict:
     for p in (LEARNED, EXAMPLE):
         if os.path.isfile(p):
             try:
-                return json.load(open(p))
-            except Exception:
+                with open(p, encoding="utf-8") as handle:
+                    return json.load(handle)
+            except (OSError, ValueError, TypeError):
                 continue
     return {}
 
@@ -60,31 +171,73 @@ def resolve(page, portal: str, intent: str, timeout_ms: int = 2000):
     return None
 
 
+def snapshot_actionable_controls(page, limit: int = 80) -> list[dict]:
+    """Return local control metadata without form values or hidden content."""
+    try:
+        return page.evaluate(
+            """(limit) => {
+              const allowed = new Set(['BUTTON','A']);
+              const out = [];
+              for (const el of document.querySelectorAll('button,a,[role]')) {
+                if (out.length >= limit) break;
+                const role = (el.getAttribute('role') || (el.tagName === 'A' ? 'link' : 'button')).toLowerCase();
+                if (!['button','link','checkbox','radio','tab','combobox','menuitem'].includes(role)) continue;
+                const box = el.getBoundingClientRect();
+                if (box.width < 2 || box.height < 2) continue;
+                const name = (el.getAttribute('aria-label') || el.innerText || '').trim().slice(0, 120);
+                if (!name) continue;
+                out.push({id: `c${out.length}`, role, name,
+                  testid: el.getAttribute('data-testid') || el.getAttribute('data-test') || ''});
+              }
+              return out;
+            }""",
+            limit,
+        )
+    except Exception:
+        return []
+
+
+def _llm_transport(body: dict) -> dict:
+    import urllib.request
+    key = os.environ.get("GROQ_API_KEY") or os.environ.get("UI_LLM_API_KEY")
+    if not key or os.environ.get("UI_LLM") == "0":
+        return {"none": True}
+    base = os.environ.get("UI_LLM_BASE", "https://api.groq.com/openai/v1").rstrip("/")
+    req = urllib.request.Request(
+        base + "/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+        method="POST",
+    )
+    raw = json.loads(urllib.request.urlopen(req, timeout=12).read().decode())
+    return json.loads(raw["choices"][0]["message"]["content"])
+
+
 def click(page, portal: str, intent: str, timeout_ms: int = 3000) -> bool:
+    """Click a trusted intent; optional LLM may choose only a low-risk candidate."""
     el = resolve(page, portal, intent, timeout_ms)
-    if el is None:
-        spec = llm_pick(page, portal, intent)
-        if spec:
-            remember(portal, intent, spec)
-            for loc in _locators(page, spec):
+    if el is None and intent not in {"submit", "send"}:
+        controls = snapshot_actionable_controls(page)
+        try:
+            candidate = llm_pick_candidate(controls, portal, intent, _llm_transport)
+            control = validate_action_candidate(candidate, controls, intent=intent, source="llm")
+            for loc in _locators(page, {"role": control["role"], "name": control["name"]}):
                 try:
-                    el = loc.first
-                    if el.count() and el.is_visible():
+                    candidate_el = loc.first
+                    if candidate_el.count() and candidate_el.is_visible():
+                        el = candidate_el
                         break
-                    el = None
                 except Exception:
-                    el = None
-        if el is None:
-            return False
+                    continue
+        except Exception:
+            el = None
+    if el is None:
+        return False
     try:
         el.click(timeout=timeout_ms)
         return True
     except Exception:
-        try:
-            el.click(timeout=timeout_ms, force=True)
-            return True
-        except Exception:
-            return False
+        return False
 
 
 def fill(page, portal: str, intent: str, value: str, timeout_ms: int = 3000) -> bool:
@@ -152,70 +305,6 @@ def report_miss(page, portal: str, intent: str, url: str = "") -> str:
     return f"needs-agent:{intent}"
 
 
-def remember(portal: str, intent: str, spec: dict) -> None:
-    """Append a learned spec so the next job does not pay for the LLM again."""
-    if not spec:
-        return
-    data = _load()
-    bucket = data.setdefault(portal, {}).setdefault(intent, [])
-    if spec not in bucket:
-        bucket.insert(0, spec)
-    os.makedirs(os.path.dirname(LEARNED), exist_ok=True)
-    try:
-        json.dump(data, open(LEARNED, "w"), indent=2)
-    except Exception:
-        pass
-
-
-def llm_pick(page, portal: str, intent: str) -> dict | None:
-    """Cheap OpenAI-compatible model picks ONE visible control for an intent.
-
-    Default: Groq llama-3.1-8b-instant (~$0.05 / $0.08 per M tokens).
-    Env: GROQ_API_KEY or UI_LLM_API_KEY
-         UI_LLM_BASE (default https://api.groq.com/openai/v1)
-         UI_LLM_MODEL (default llama-3.1-8b-instant)
-    Never used for form answers — only {role,name} / {text} / {css}.
-    """
-    key = os.environ.get("GROQ_API_KEY") or os.environ.get("UI_LLM_API_KEY") or ""
-    if not key or os.environ.get("UI_LLM") == "0":
-        return None
-    tree = snapshot_a11y(page, limit=40)
-    if not tree or tree[0].get("error"):
-        return None
-    body = {
-        "model": os.environ.get("UI_LLM_MODEL", "llama-3.1-8b-instant"),
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Pick the single control that fulfills the UI intent. "
-                    "Return JSON only: {\"role\":\"button\",\"name\":\"...\"} "
-                    "or {\"text\":\"...\"} or {\"css\":\"...\"} or {\"none\":true}. "
-                    "Use a name that appears in the inventory. Never invent answers."
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps({"portal": portal, "intent": intent, "controls": tree}),
-            },
-        ],
-    }
-    try:
-        import urllib.request
-        base = os.environ.get("UI_LLM_BASE", "https://api.groq.com/openai/v1").rstrip("/")
-        req = urllib.request.Request(
-            base + "/chat/completions",
-            data=json.dumps(body).encode(),
-            headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
-            method="POST",
-        )
-        raw = json.loads(urllib.request.urlopen(req, timeout=12).read().decode())
-        txt = raw["choices"][0]["message"]["content"]
-        spec = json.loads(txt)
-        if spec.get("none") or not (spec.get("name") or spec.get("text") or spec.get("css")):
-            return None
-        return {k: spec[k] for k in ("role", "name", "text", "css") if spec.get(k)}
-    except Exception:
-        return None
+def remember(portal: str, intent: str, spec: dict, *, verified: bool = False) -> bool:
+    """Compatibility wrapper; callers must explicitly prove verification."""
+    return remember_after_verified(portal, intent, spec, verified=verified)

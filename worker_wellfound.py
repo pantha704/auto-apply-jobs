@@ -6,6 +6,7 @@ import json, os, re, sqlite3, sys, time, signal
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 from playwright.sync_api import sync_playwright
 import audit
+import dynamic_ui
 import jd_match
 from title_filter import is_tech_title
 from worker_guard import BrowserWatchdog, exit_if_fired
@@ -196,21 +197,18 @@ def _apply_one(url):
                 page.get_by_role("button", name=re.compile("^Apply Now$", re.I)).first.wait_for(state="visible", timeout=8000)
             except Exception:
                 pass
-            # open apply dialog (intent map first, then Apply Now, then autoOpen URL)
+            # intent map first; no raw-selector fallback
             dialog_open = False
             for attempt in range(3):
                 try:
-                    import dynamic_ui
                     if not dynamic_ui.click(page, "wellfound", "apply"):
-                        b = page.get_by_role("button", name=re.compile("^Apply Now$", re.I)).first
-                        b.scroll_into_view_if_needed(timeout=3000)
-                        b.click(timeout=4000)
+                        break
                     try:
                         page.locator(APPLY_DIALOG).first.wait_for(state="visible", timeout=6000)
                     except Exception:
                         pass
                 except Exception:
-                    pass
+                    break
                 if page.locator(APPLY_DIALOG).count() > 0:
                     try:
                         txt = page.locator(APPLY_DIALOG).inner_text().lower()
@@ -219,7 +217,7 @@ def _apply_one(url):
                     if "we value your privacy" in txt or "trustarc" in txt:
                         # consent banner faked the dialog match — dismiss and retry
                         try:
-                            page.locator("button:has-text('Reject All'), button:has-text('Agree & Proceed')").first.click(timeout=3000)
+                            dynamic_ui.click(page, "wellfound", "dismiss_consent", timeout_ms=3000)
                             page.wait_for_timeout(1500)
                         except Exception:
                             pass
@@ -468,7 +466,8 @@ def _apply_one(url):
                                     pass
                     except Exception:
                         pass
-                btn.first.click(timeout=5000)
+                if not dynamic_ui.click(page, "wellfound", "submit", timeout_ms=5000):
+                    raise RuntimeError("submit intent failed")
                 if os.environ.get("WF_DEBUG"):
                     try:
                         with open(os.path.join(HERE, "logs", "wf_submit_fail.log"), "a") as df:

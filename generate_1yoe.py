@@ -80,7 +80,9 @@ for j in sel:
         lines.append("|---|-----|---------|----------|------|--------|------|")
         last = key
     n += 1
-    lines.append(f"| {n} | {j['title'].replace('|','\\\\|')} | {j['company'].replace('|','\\\\|')} | {j['location'].replace('|','\\\\|')} | {j.get('worktype','')} | {j['date']} | [view]({j['link']}) |")
+    title = j["title"].replace("|", "\\\\|")
+    company = j["company"].replace("|", "\\\\|")
+    lines.append(f"| {n} | {title} | {company} | {j['location']} | {j.get('worktype','')} | {j['date']} | [view]({j['link']}) |")
 
 open(os.path.join(OUT_DIR, "compatible_1yoe.md"), "w").write("\n".join(lines))
 with open(os.path.join(OUT_DIR, "compatible_1yoe.csv"), "w", newline="") as f:

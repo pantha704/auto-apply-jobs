@@ -110,7 +110,7 @@ Naukri harvest may return cards; **applying** Naukri from a datacenter IP is par
 
 ## 4. Workers (apply plane)
 
-All workers: Playwright + Cloak Chromium (`executable_path`), `TMPDIR` on **real disk** (tmpfs kills Chrome), `BrowserWatchdog` (~240s) so a wedged CDP pipe cannot hang forever.
+All workers: **CloakBrowser non-pro** driven by **Playwright Python** (`launch_persistent_context(..., executable_path=CLOAK)`). `p.chromium` is Playwright’s protocol name — the process is Cloak, not stock Chromium. Do not `playwright install chromium`. `TMPDIR` on **real disk** (tmpfs kills Cloak). `BrowserWatchdog` (~240s) so a wedged CDP pipe cannot hang forever. Agents repair UIs via **CloakBrowser MCP** + **Playwright MCP**, not by launching Google Chrome. Full stack: `docs/STACK.md`.
 
 They must **sleep on empty**, not `sys.exit`. Exit + `Restart=always` = restart storm (YC bug, fixed). Internshala daily cap counts **today’s** `applications` rows, not lifetime `jobs` applies.
 

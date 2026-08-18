@@ -4,7 +4,9 @@ set -u
 cd /home/ubuntu/job_hunt_linkedin || exit 1
 mkdir -p logs
 export TMPDIR=/home/ubuntu/tmp_chrome
-export WF_PASSWORD="$(cat wf_password.txt 2>/dev/null)"
+# Credentials must be supplied by the private environment (for example,
+# /etc/jobhunt/job-hunt.env); never read or export a password from the repo.
+: "${WF_PASSWORD:?WF_PASSWORD must be set outside the repository}"
 PY=/home/ubuntu/jobhunt-venv/bin/python
 
 pkill -f "[w]orker_linkedin.py" 2>/dev/null

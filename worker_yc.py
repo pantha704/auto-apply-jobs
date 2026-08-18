@@ -16,6 +16,7 @@ os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 from worker_guard import BrowserWatchdog
 from playwright.sync_api import sync_playwright
 import audit
+import dynamic_ui
 import jd_match
 from title_filter import is_tech_title
 
@@ -108,10 +109,8 @@ def apply_job(page, job):
     if h1 and not is_tech_title(h1, "yc"):
         return ("skip", "non-tech-title", "")
 
-    # click Apply (link styled as button)
-    try:
-        page.click("a:has-text('Apply')", timeout=8000)
-    except Exception:
+    # Intent-first apply navigation; no model fallback is allowed to send.
+    if not dynamic_ui.click(page, "yc", "apply", timeout_ms=8000):
         return ("skip", "no-apply-button", "")
 
     # wait for the message modal
@@ -136,16 +135,9 @@ def apply_job(page, job):
         return ("skip", f"fill-err:{str(e)[:60]}", "")
 
     # Send
-    sent = False
-    for sel in ["button:has-text('Send')", "button[type=submit]:has-text('Send')"]:
-        try:
-            page.click(sel, timeout=5000)
-            sent = True
-            break
-        except Exception:
-            continue
-    if not sent:
+    if not dynamic_ui.click(page, "yc", "send", timeout_ms=5000):
         return ("skip", "no-send-button", "")
+    sent = True
 
     page.wait_for_timeout(4000)
     # modal should be gone / success text

@@ -10,6 +10,7 @@ import json, os, re, sqlite3, sys, time, signal
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 from playwright.sync_api import sync_playwright
 from worker_guard import BrowserWatchdog
+import dynamic_ui
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
@@ -144,12 +145,10 @@ def himalayas_apply(url):
             if "job expired" in body or "no longer accepting" in body or "position has been filled" in body:
                 ctx.close()
                 return (False, "job-expired")
-            # click apply
-            try:
-                page.locator("button:has-text('Apply')").first.click(timeout=5000)
-            except Exception as e:
+            # Intent-first entry into the Himalayas application flow.
+            if not dynamic_ui.click(page, "himalayas", "apply", timeout_ms=5000):
                 ctx.close()
-                return (False, f"no-apply-btn:{str(e)[:40]}")
+                return (False, "no-apply-btn")
             page.wait_for_timeout(7000)
             b2 = page.inner_text("body")
             low2 = b2.lower()
@@ -161,11 +160,12 @@ def himalayas_apply(url):
             if "i'm ready to apply" in low2 or "generate cover letter with ai" in low2:
                 try:
                     try:
-                        page.click("text=Don't show this again", timeout=2000)
+                        dynamic_ui.click(page, "himalayas", "dismiss_upsell", timeout_ms=2000)
                         page.wait_for_timeout(600)
                     except Exception:
                         pass
-                    page.click("button:has-text(\"I'm ready to apply\")", timeout=4000)
+                    if not dynamic_ui.click(page, "himalayas", "ready", timeout_ms=4000):
+                        raise RuntimeError("upsell ready intent failed")
                     page.wait_for_timeout(5000)
                     b2 = page.inner_text("body")
                     low2 = b2.lower()
@@ -178,17 +178,9 @@ def himalayas_apply(url):
                     ta.fill(NOTE)
                 except Exception as e:
                     log(f"hima note fill err: {str(e)[:60]}")
-                submitted = False
-                for lbl in ("Send application", "Submit application", "Submit", "Apply"):
-                    try:
-                        el = page.locator(f"button:has-text('{lbl}')").last
-                        if el.count() > 0 and el.is_visible():
-                            el.click(timeout=4000)
-                            submitted = True
-                            log(f"hima submit via {lbl}")
-                            break
-                    except Exception:
-                        continue
+                submitted = dynamic_ui.click(page, "himalayas", "submit", timeout_ms=4000)
+                if submitted:
+                    log("hima submit via trusted intent")
                 if not submitted:
                     ctx.close()
                     return (False, "no-send-button")

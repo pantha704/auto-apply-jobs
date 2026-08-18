@@ -8,6 +8,7 @@ Type=simple
 User=ubuntu
 Environment=TMPDIR=/home/ubuntu/tmp_chrome
 WorkingDirectory=/home/ubuntu/job_hunt_linkedin
+EnvironmentFile=-/etc/jobhunt/job-hunt.env
 ExecStart=/home/ubuntu/jobhunt-venv/bin/python /home/ubuntu/job_hunt_linkedin/worker_internshala.py %i
 Restart=on-failure
 RestartSec=30

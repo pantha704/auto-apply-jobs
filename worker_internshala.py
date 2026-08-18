@@ -8,6 +8,7 @@ import json, os, re, sqlite3, sys, time
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 from playwright.sync_api import sync_playwright
 import audit
+import dynamic_ui
 import jd_match
 from worker_guard import BrowserWatchdog
 import profile as ident
@@ -126,15 +127,9 @@ def upload_resume(page):
         return False
 
 def submit(page):
-    for label in ["Submit application", "Submit Application", "Submit", "Apply"]:
-        try:
-            b = page.locator(f"button:has-text('{label}'), input[type=submit][value*='{label}'], a:has-text('{label}')").first
-            if b.is_visible(timeout=2000):
-                b.click(timeout=8000)
-                log(f"clicked {label}")
-                return True
-        except Exception:
-            continue
+    if dynamic_ui.click(page, "internshala", "submit", timeout_ms=8000):
+        log("clicked trusted submit intent")
+        return True
     return False
 
 def main():
@@ -185,21 +180,14 @@ def main():
                     log("skip: closed")
                     continue
 
-                # find and click Apply Now
-                clicked = False
-                for sel in ["button:has-text('Apply Now')", "a:has-text('Apply Now')", "button:has-text('Apply now')"]:
-                    try:
-                        b = page.locator(sel).first
-                        if b.is_visible(timeout=2000):
-                            b.click(timeout=8000)
-                            clicked = True
-                            log("clicked Apply Now")
-                            break
-                    except Exception:
-                        continue
+                # Intent-first apply navigation; LLM may only choose a low-risk
+                # candidate from the sanitized actionable-control inventory.
+                clicked = dynamic_ui.click(page, "internshala", "apply", timeout_ms=8000)
+                if clicked:
+                    log("clicked Apply intent")
                 if not clicked:
                     mark(job["id"], "skip", "no-apply-button")
-                    log("skip: no apply button")
+                    log("skip: no apply intent")
                     continue
 
                 page.wait_for_timeout(3500)
@@ -207,7 +195,8 @@ def main():
                 if "/student/resume" in page.url:
                     log("resume intermediate page")
                     try:
-                        page.click("a:has-text('Proceed to application'), button:has-text('Proceed to application')", timeout=8000)
+                        if not dynamic_ui.click(page, "internshala", "proceed", timeout_ms=8000):
+                            raise RuntimeError("proceed intent failed")
                         log("clicked Proceed to application")
                         page.wait_for_timeout(4000)
                     except Exception as e:
@@ -234,10 +223,13 @@ def main():
                                              answers=note[:300], resume_used=RESUME)
                     log("APPLIED")
                 elif ok:
-                    mark(job["id"], "done", "submitted-unconfirmed")
-                    audit.record_application("internshala", "", job["title"], job["url"], "submitted-unconfirmed",
-                                             answers=note[:300], resume_used=RESUME)
-                    log("submitted (unconfirmed)")
+                    fails[job["id"]] = fails.get(job["id"], 0) + 1
+                    if fails[job["id"]] >= 2:
+                        mark(job["id"], "skip", "submit-unconfirmed")
+                        log("skip: submit unconfirmed after retries")
+                    else:
+                        mark(job["id"], "pending", "submit-unconfirmed")
+                        log("submit clicked but confirmation missing; requeued")
                 else:
                     fails[job["id"]] = fails.get(job["id"], 0) + 1
                     if fails[job["id"]] >= 2:

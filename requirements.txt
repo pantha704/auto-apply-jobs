@@ -1,0 +1,7 @@
+# Runtime dependencies. The browser binary is supplied by CloakBrowser;
+# do not run `playwright install` for this project.
+playwright>=1.62,<2
+requests>=2.34,<3
+beautifulsoup4>=4.15,<5
+pypdf>=6,<7
+cryptography>=50,<51

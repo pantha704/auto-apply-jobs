@@ -46,22 +46,22 @@ D. Drift
 When a portal UI drifted:
 
 1. **Reproduce one URL** from the queue (`SELECT url, result FROM jobs WHERE result LIKE 'needs-agent%' OR result LIKE 'no-apply-modal%' LIMIT 1`).
-2. Open it headed or headless with the **same profile** the worker uses.
+2. Open it with a **copied CloakBrowser profile** through CloakBrowser MCP and/or Playwright MCP. Never attach the live worker profile to an agent repair session.
 3. Capture:
-   - screenshot (`audits/` or `/tmp/agent_*.png`)
-   - accessibility snapshot (roles + names, not raw HTML dump)
+   - screenshot in the gitignored agent inbox
+   - sanitized actionable-control inventory (roles + names, never textbox values)
    - the button/text a human would click
 4. Update **`learned/selectors.json`**:
    - key = intent (`apply`, `submit`, `dismiss_consent`, `easy_apply`, `login_wall`, …)
-   - values = list of strategies, most stable first:
-     `{ "role": "button", "name": "Submit application" }`
-     `{ "text": "Easy Apply" }`
-     `{ "css": "[data-test=apply]" }`  ← last resort
-5. Only if the intent map cannot express the step, patch the worker’s **control flow** (new modal, extra page). Do not add a one-off hex class.
-6. Requeue those rows (`status=pending`, clear `result` / `claimed_by`).
-7. Restart that worker so it loads the new map.
-8. Watch one live apply or an honest skip.
-9. **Commit the learning** (`learned/selectors.json` + any worker flow change). That is the memory.
+   - values = typed human/agent strategies, most stable first:
+     `{ "role": "button", "name": "Submit application", "source": "agent" }`
+   - LLM output must be a candidate ID only; never paste arbitrary model CSS/XPath.
+5. Replay the intent on the fixture or copied profile and verify the expected postcondition.
+6. Persist learning only after that postcondition succeeds. Failed or ambiguous attempts remain `needs-agent:<intent>`.
+7. Only if the intent map cannot express the step, patch the worker’s **control flow** (new modal, extra page). Do not add a one-off hex class.
+8. Requeue those rows (`status=pending`, clear `result` / `claimed_by`).
+9. Restart only that worker after review; watch one live apply or an honest skip.
+10. **Commit the learning** (`learned/selectors.json` + any worker flow change). That is the memory.
 
 ---
 

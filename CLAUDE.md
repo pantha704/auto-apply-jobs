@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **job_hunt_linkedin** (1301 symbols, 1826 relationships, 46 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **auto-apply-jobs** (1052 symbols, 1703 relationships, 75 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -25,10 +25,10 @@ This project is indexed by GitNexus as **job_hunt_linkedin** (1301 symbols, 1826
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/job_hunt_linkedin/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/job_hunt_linkedin/clusters` | All functional areas |
-| `gitnexus://repo/job_hunt_linkedin/processes` | All execution flows |
-| `gitnexus://repo/job_hunt_linkedin/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/auto-apply-jobs/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/auto-apply-jobs/clusters` | All functional areas |
+| `gitnexus://repo/auto-apply-jobs/processes` | All execution flows |
+| `gitnexus://repo/auto-apply-jobs/process/{name}` | Step-by-step execution trace |
 
 ## CLI
 

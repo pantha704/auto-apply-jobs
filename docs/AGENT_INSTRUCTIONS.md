@@ -6,7 +6,11 @@ This system is **dynamic**. Portal UIs change without notice. You are the runtim
 Worker scripts are a **fast path**, not a finished bot. When the page does not
 match an intent, you repair the intent map (or the flow) and continue.
 
+Browser stack is **CloakBrowser non-pro + Playwright** (Python driver + CloakBrowser MCP + Playwright MCP). Not stock Chromium. See `docs/STACK.md`.
+
 Read in this order:
+
+0. `docs/STACK.md`
 
 1. This file
 2. `docs/ARCHITECTURE.md` — every component, data flow, how it is supposed to work
@@ -97,15 +101,12 @@ Commit the JSON. That *is* learning.
 
 Never guess-click an unlabeled control.
 
-Wellfound already tries `dynamic_ui.click(..., "apply")` before the old Apply Now locator.
+Workers use `dynamic_ui.click(intent)` for navigation and submit controls. A miss returns false and is handled as `needs-agent`; there is no raw-selector fallback for apply/submit actions.
 
-Optional **cheap UI LLM** (recommended: Groq `llama-3.1-8b-instant`,
-~$0.05 in / $0.08 out per million tokens): set `GROQ_API_KEY`.
-On intent miss, `dynamic_ui.llm_pick` sends the a11y inventory (not the
-screenshot, not the form answers) and gets back `{role,name}`. That spec is
-saved into `learned/selectors.json` so the next listing is free.
-`UI_LLM=0` disables. Any OpenAI-compatible host: `UI_LLM_BASE` + `UI_LLM_API_KEY`.
-Do **not** send profile/CTC to this model. Do **not** let it fill forms.
+Optional **cheap UI LLM** (recommended: Groq `llama-3.1-8b-instant`): set `GROQ_API_KEY` only in the private host environment. On a low-risk intent miss, the sanitized actionable-control inventory is sent without textbox values, cookies, profile data, URLs with tokens, or screenshots. The model may return only a known `candidate_id`; it can never return CSS/XPath and can never select `submit`/`send`.
+
+Selectors are learned only after an agent/human change is followed by a verified postcondition. `UI_LLM=0` disables the fallback. Any OpenAI-compatible host uses `UI_LLM_BASE` + `UI_LLM_API_KEY`.
+Do **not** send profile/CTC to this model. Do **not** let it fill forms or submit applications.
 
 ---
 
