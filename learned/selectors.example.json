@@ -1,0 +1,60 @@
+{
+  "wellfound": {
+    "dismiss_consent": [
+      { "role": "button", "name": "Reject All" },
+      { "role": "button", "name": "Agree & Proceed" },
+      { "css": "#truste-consent-required" }
+    ],
+    "apply": [
+      { "role": "button", "name": "Apply" }
+    ],
+    "submit": [
+      { "role": "button", "name": "Submit" },
+      { "role": "button", "name": "Send" }
+    ]
+  },
+  "linkedin": {
+    "easy_apply": [
+      { "role": "button", "name": "Easy Apply" }
+    ],
+    "next": [
+      { "role": "button", "name": "Next" }
+    ],
+    "review": [
+      { "role": "button", "name": "Review" }
+    ],
+    "submit": [
+      { "role": "button", "name": "Submit application" }
+    ]
+  },
+  "internshala": {
+    "apply": [
+      { "role": "button", "name": "Apply now" }
+    ],
+    "submit": [
+      { "role": "button", "name": "Submit" }
+    ]
+  },
+  "yc": {
+    "apply": [
+      { "role": "button", "name": "Apply" }
+    ],
+    "send": [
+      { "role": "button", "name": "Send" }
+    ]
+  },
+  "himalayas": {
+    "apply": [
+      { "role": "button", "name": "Apply" }
+    ]
+  },
+  "weworkremotely": {
+    "apply": [
+      { "role": "link", "name": "Apply for this job" }
+    ],
+    "not_apply": [
+      { "text": "job-copilot" },
+      { "text": "career services" }
+    ]
+  }
+}

@@ -1,46 +1,50 @@
 # auto-apply-jobs
 
-Multi-source **job application farm**: parallel headless workers claim roles from a SQLite queue and apply on LinkedIn (Easy Apply), Wellfound, Y Combinator, Internshala, Himalayas, and WeWorkRemotely.
+A **multi-portal job-apply farm** meant to be **run by an AI agent**, not a pile of frozen CSS selectors.
 
-No cookies, passwords, or personal identity ship in this repo. You bring your own profile + sessions.
+Sites change their UI every week. Hardcoded `button.easy-apply` **will** rot. This repo’s contract is:
+
+1. Workers try a **small, intent-based** apply (role/name/text, not one class name).
+2. On mismatch they **stop and ask an agent** (screenshot + DOM + reason) instead of clicking the wrong thing.
+3. The agent **patches the intent map** (or the worker) and requeues. That patch *is* the learning.
+
+Humans set identity + sessions. Agents run, watch, and repair.
 
 ---
 
 ## How it fits together
 
 ```
-  scrape / collect                 apply                         record
- ┌─────────────────┐          ┌──────────────┐            ┌─────────────┐
- │ site_collect.py │          │ worker_yc    │            │ applications│
- │ wellfound_fresh │──inject──│ worker_wf ×2 │──honest───▶│  audit table│
- │ us_startup_     │  queue   │ worker_li ×2 │   skip or  │  screenshots│
- │   collect.py    │          │ worker_is    │   submit   │  watchdog   │
- └────────┬────────┘          │ worker_ext   │            └─────────────┘
-          │                   └──────▲───────┘
-          ▼                          │
-   apply_queue.db ◀──atomic claim────┘
-   (pending / claimed / done / skip)
+ you (once)                    agent loop (ongoing)
+ ┌──────────────┐              ┌─────────────────────────────┐
+ │ profile_local│              │ 1 collect → inject queue    │
+ │ resume.pdf   │              │ 2 workers claim + apply     │
+ │ portal login │─────────────▶│ 3 audit / skip honestly     │
+ └──────────────┘              │ 4 UI break? → screenshot    │
+                               │ 5 agent patches intent map  │
+                               │ 6 requeue + continue        │
+                               └─────────────┬───────────────┘
+                                             ▼
+                                    apply_queue.db
+                                    applications (truth)
+                                    learned/selectors.json
 ```
 
-Workers **never invent answers**. Unknown questions → skip. US-citizens-only, visa walls, non-tech titles, dead listings → skip.
+**Do not treat worker `*.py` as a finished bot.** Treat them as a fast path. The README + `docs/AGENT_LOOP.md` are how a stranger (or Hermes / Claude Code / Codex / OpenCode) actually operates the farm.
 
 ---
 
 ## Requirements
 
-| Need | Version / notes |
+| Need | Notes |
 |---|---|
-| OS | Linux (headless VPS is fine) |
-| Python | 3.11+ |
-| Browser | [CloakBrowser](https://github.com/CloakHQ/cloakbrowser) or Chromium |
-| Packages | `playwright` (and its browsers) |
-| Optional | systemd, for supervised workers |
+| Linux | headless VPS is fine |
+| Python 3.11+ | venv |
+| Playwright + Chromium or CloakBrowser | stealth Chromium preferred |
+| An **agent** | Hermes, Claude Code, Codex, OpenCode, or any tool-using LLM that can read screenshots + edit files |
+| Optional | systemd, 5‑min watchdog cron |
 
-**You also need (never committed):**
-- `profile_local.py` — name, email, phone, address
-- resume PDF
-- logged-in portal sessions (`profiles/`, `portal_*.json`)
-- passwords only via env: `GOOGLE_PASSWORD`, `WF_PASSWORD`
+**Never in git:** `profile_local.py`, `.env`, cookies (`portal_*.json`, `profiles/`), DBs, resumes, passwords.
 
 ---
 
@@ -49,146 +53,128 @@ Workers **never invent answers**. Unknown questions → skip. US-citizens-only, 
 ```bash
 git clone https://github.com/pantha704/auto-apply-jobs.git
 cd auto-apply-jobs
-
 python3 -m venv .venv
 source .venv/bin/activate
 pip install playwright
 playwright install chromium
 ```
 
-Set `CLOAK` in the workers if your Chromium is not at the default path.
-
 ---
 
-## 2. Identity (private)
+## 2. Identity (you, once)
 
 ```bash
-cp profile_local.example.py profile_local.py
-# edit profile_local.py — this file is gitignored
-
+cp profile_local.example.py profile_local.py   # gitignored
 cp .env.example .env
-# optional: GOOGLE_PASSWORD, WF_PASSWORD, JOBHUNT_RESUME, IS_DAILY_CAP
+# put YOUR honest YOE / CTC / notice / relocate / sponsorship answers
 ```
 
-Answer-bank fields you **must** set honestly (used on forms):
-
-| Field | Meaning |
-|---|---|
-| years of experience | integer, no inflation |
-| current / expected CTC | local currency or USD |
-| notice period | days |
-| relocate | yes/no |
-| education completed | yes/no |
-| US work auth | yes/no |
-| visa sponsorship needed | yes/no |
-
-Defaults in `audit.py` / workers are **examples**. Change them to *your* truth. The farm would rather skip than lie.
+Workers skip rather than invent. Fill the truth.
 
 ---
 
-## 3. Sessions
+## 3. Let an agent run it (this is the default)
 
-Each portal needs a warm browser profile or cookie jar (gitignored):
+Point an agent at this repo and give it **`docs/AGENT_LOOP.md`** as the standing order.
 
-| Portal | Typical files |
-|---|---|
-| LinkedIn | `li_state.json` or `profiles/li_login` |
-| Wellfound | `portal_wellfound.json` |
-| Internshala | `profiles/is_login` |
-| YC | existing WAAS SSO profile |
-| Himalayas | `profiles/hima_cap` |
+Example kickoff prompt:
 
-Capture helpers (run locally, headed if the site challenges you):
+> You are operating auto-apply-jobs. Read README.md and docs/AGENT_LOOP.md.
+> Do not hardcode new CSS classes as the only path.
+> Collect → inject → run workers → if a portal UI drifted, screenshot +
+> accessibility snapshot, update learned/selectors.json (intent → role/name/text),
+> patch the worker only if the intent map is not enough, requeue those jobs,
+> commit the learning. Never invent form answers. Never commit secrets.
 
-```bash
-python capture_yc.py
-python wf_google_login.py     # needs GOOGLE_PASSWORD in env
-python hima_fill_v9.py        # onboard Himalayas profile
-```
+That is how the farm **self-learns**: each UI break becomes a checked-in intent, not a one-off “fix it in chat”.
 
-Naukri is **parked** (Akamai from datacenter IPs). Don’t expect it to work from a VPS.
+### What the agent is allowed to change
+- `learned/selectors.json` — intent keys (`apply`, `submit`, `dismiss_consent`, `easy_apply`, …)
+- worker control flow when a portal adds a new step
+- title filters / skip reasons (honest)
+
+### What the agent must not do
+- commit cookies, `.env`, `profile_local.py`, DBs
+- click a guessed button with no label
+- mark `applied` unless the audit row is real
+- answer a form field that is not in the honest bank → **skip**
 
 ---
 
-## 4. Queue and sanity
+## 4. Fast path (optional, no agent)
+
+If a portal’s current UI still matches:
 
 ```bash
 python sanity_check.py
-# title filter, JD match, DB schema, worker imports
-```
-
-Load jobs:
-
-```bash
-python site_collect.py                 # writes /tmp/site_collect.json
+python site_collect.py
 python inject_site.py /tmp/site_collect.json
-# or
-python wellfound_fresh.py && python inject_site.py /tmp/wellfound_fresh.json
-```
 
----
-
-## 5. Run workers
-
-```bash
 python worker_internshala.py is-w1
 python worker_wellfound.py wf-w1
 python worker_yc.py w1
 python worker_linkedin.py li-w1
-python worker_external.py w1          # Himalayas + WWR
-python watchdog.py                    # optional loop / cron every 5 min
+python worker_external.py w1
 ```
 
-systemd units in-repo: `jobhunt-is@.service`, `jobhunt-wf@.service`, `jobhunt-li@.service`.
-
-Internshala: **40 applies/day**, counted from **today’s** `applications` rows (not lifetime).
-
-YC: sleeps on empty queue (does **not** exit — avoids a systemd crash-loop).
+When a worker logs `needs-agent`, `no-apply-modal`, `fill-err`, or `submit-unconfirmed` — **stop scripting and run the agent loop.** Do not add another `button.css-abc123`.
 
 ---
 
-## 6. What “applied” means
+## 5. Sessions
 
-Source of truth is the `applications` table, **not** `jobs.status='done'`.
+Warm profiles stay on disk (gitignored):
 
-| `jobs.result` | Meaning |
+| Portal | Session |
 |---|---|
-| `applied` / audit `submitted` | Real apply |
-| `citizens-only` / `sponsorship-block` / `location-block` | Honest skip |
-| `no-easy-apply` / `external-or-closed` | LinkedIn not Easy Apply |
-| `job-expired` / `category-page` | Bad harvest row |
-| `wwr-upsell-not-apply` | WeWorkRemotely career-services page, not an apply |
-| `external-apply:https://…` | Opened a real ATS URL (you may still need to finish it) |
+| LinkedIn | `li_state.json` / `profiles/li_login` |
+| Wellfound | `portal_wellfound.json` |
+| Internshala | `profiles/is_login` |
+| Himalayas | `profiles/hima_cap` |
+| YC | WAAS SSO profile |
+
+Naukri is parked (Akamai from datacenter IPs).
 
 ---
 
-## 7. Do not commit
+## 6. Truth table
 
-```
-profile_local.py   .env   wf_password.txt
-portal_*.json      li_state.json      profiles/
-apply_queue.db     jobs.db            audits/
-*.pdf              *.log              state_queue/
-```
+`applications` is source of truth, not `jobs.status='done'`.
 
-See `.gitignore`. If you fork this, run a secret scan before the first public push. Old git history can leak even after a later fix — this `main` is a **clean snapshot** with no identity files.
+| Result | Meaning |
+|---|---|
+| audit `submitted` | Real apply |
+| `needs-agent` | UI drift — agent must learn |
+| `citizens-only` / `sponsorship-block` | Honest skip |
+| `no-easy-apply` | LinkedIn external ATS |
+| `job-expired` | Dead listing |
+| `wwr-upsell-not-apply` | Career-services page, not an apply |
 
 ---
 
 ## Portals
 
-| Site | In-repo worker | Notes |
+| Site | Worker | Agent owns |
 |---|---|---|
-| Internshala | `worker_internshala.py` | Daily cap |
-| Wellfound | `worker_wellfound.py` | TrustArc banner ≠ apply modal |
-| YC Work at a Startup | `worker_yc.py` | Many roles are US-citizens-only |
-| LinkedIn | `worker_linkedin.py` | Easy Apply only (~10–15% of listings) |
-| Himalayas | `worker_external.py` | Needs onboarded talent profile |
-| WeWorkRemotely | `worker_external.py` | Mostly external ATS |
-| Naukri | — | Parked (Akamai) |
+| Internshala | `worker_internshala.py` | form steps + daily cap |
+| Wellfound | `worker_wellfound.py` | consent vs apply dialog |
+| YC | `worker_yc.py` | company → job expand, message modal |
+| LinkedIn | `worker_linkedin.py` | Easy Apply only |
+| Himalayas / WWR | `worker_external.py` | expired cards, ATS vs upsell |
+| Naukri | — | parked |
+
+---
+
+## Docs
+
+| File | For |
+|---|---|
+| [docs/AGENT_LOOP.md](docs/AGENT_LOOP.md) | **How an agent runs and repairs this farm** |
+| [learned/selectors.example.json](learned/selectors.example.json) | Intent map shape |
+| `.env.example` / `profile_local.example.py` | Secrets stay local |
 
 ---
 
 ## License
 
-MIT. Use only on accounts you own. Sites’ ToS apply — this is your risk.
+MIT. Use only on accounts you own. Site ToS apply.
