@@ -40,3 +40,7 @@ master_pool.md
 us_remote_apply_master.md
 hn_top_matches.md
 learned/agent_inbox/
+controlplane.db
+.controlplane.key
+*.db-wal
+*.db-shm

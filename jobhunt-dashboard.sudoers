@@ -1,0 +1,28 @@
+# Exact worker controls for the ApplyPilot dashboard. No wildcards.
+Cmnd_Alias JOBHUNT_DASHBOARD_WORKERS = \
+  /usr/bin/systemctl start jobhunt-is@is-w1.service, \
+  /usr/bin/systemctl stop jobhunt-is@is-w1.service, \
+  /usr/bin/systemctl restart jobhunt-is@is-w1.service, \
+  /usr/bin/systemctl start jobhunt-li@w1.service, \
+  /usr/bin/systemctl stop jobhunt-li@w1.service, \
+  /usr/bin/systemctl restart jobhunt-li@w1.service, \
+  /usr/bin/systemctl start jobhunt-li@w2.service, \
+  /usr/bin/systemctl stop jobhunt-li@w2.service, \
+  /usr/bin/systemctl restart jobhunt-li@w2.service, \
+  /usr/bin/systemctl start jobhunt-wf@w1.service, \
+  /usr/bin/systemctl stop jobhunt-wf@w1.service, \
+  /usr/bin/systemctl restart jobhunt-wf@w1.service, \
+  /usr/bin/systemctl start jobhunt-wf@w2.service, \
+  /usr/bin/systemctl stop jobhunt-wf@w2.service, \
+  /usr/bin/systemctl restart jobhunt-wf@w2.service, \
+  /usr/bin/systemctl start jobhunt-yc@w1.service, \
+  /usr/bin/systemctl stop jobhunt-yc@w1.service, \
+  /usr/bin/systemctl restart jobhunt-yc@w1.service, \
+  /usr/bin/systemctl start jobhunt-ext@w1.service, \
+  /usr/bin/systemctl stop jobhunt-ext@w1.service, \
+  /usr/bin/systemctl restart jobhunt-ext@w1.service, \
+  /usr/bin/systemctl start jobhunt-review@r1.service, \
+  /usr/bin/systemctl stop jobhunt-review@r1.service, \
+  /usr/bin/systemctl restart jobhunt-review@r1.service
+
+ubuntu ALL=(root) NOPASSWD: JOBHUNT_DASHBOARD_WORKERS

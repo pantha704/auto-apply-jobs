@@ -4,8 +4,10 @@ This is the map of the farm. Agents: treat this as ground truth. If code and thi
 file disagree, **read the code**, then update this file in the same change.
 
 Repo root (operators usually clone to something like `/home/ubuntu/job_hunt_linkedin`).
-SQLite file: **`apply_queue.db`** (gitignored). Python venv is whatever you create
-(examples below use `.venv` or `/home/ubuntu/jobhunt-venv`).
+Production SQLite file: **`/var/lib/jobhunt/apply_queue.db`**. The gitignored
+repository path `apply_queue.db` may be a compatibility symlink to it for legacy
+workers. Python venv is whatever you create (examples below use `.venv` or
+`/home/ubuntu/jobhunt-venv`).
 
 ---
 
@@ -285,3 +287,64 @@ Index name: **auto-apply-jobs**. Re-analyze after every commit batch.
 | `docs/AGENT_INSTRUCTIONS.md` | paste into an agent |
 | `docs/AGENT_LOOP.md` | UI repair tick |
 | `docs/ARCHITECTURE.md` | this file |
+
+---
+
+## 14. Web control plane and product architecture
+
+The dashboard is a separate control plane over the existing apply data plane. It does not launch browsers inside HTTP request handlers and does not replace the workers.
+
+```text
+Browser
+  │ Basic Auth
+  ▼
+FastAPI + static Linear-style SPA (:8787)
+  ├── read-only queue/application views ──► apply_queue.db
+  ├── worker status/actions ──────────────► systemd (allowlisted units/actions)
+  ├── onboarding/readiness engine
+  ├── encrypted site credential metadata
+  └── one-minute worker telemetry ────────► controlplane.db
+
+Existing data plane (unchanged):
+collectors ─► apply_queue.db ─► CloakBrowser/Playwright workers ─► applications audit
+```
+
+### 14.1 Components
+
+| Component | Role |
+|---|---|
+| `controlplane/app.py` | FastAPI API, migrations, encrypted vault, readiness, live metrics, telemetry |
+| `controlplane/static/index.html` | Single-page operator interface |
+| `controlplane/static/app.css` | Responsive dark Linear-style design system |
+| `controlplane/static/app.js` | API-backed navigation, forms, tables, worker controls |
+| `controlplane.db` | Local-only sites, encrypted profile fields, events, telemetry (gitignored) |
+| `.controlplane.key` or `/etc/jobhunt/controlplane.key` | Fernet master key, mode 0600, never committed |
+| `jobhunt-dashboard.service` | Production uvicorn service |
+| `jobhunt-dashboard-firewall.service` | Restores loopback/tailnet-only nftables policy at boot |
+| `jobhunt-dashboard.sudoers` | Exact worker start/stop/restart commands; no wildcard units |
+| `docs/CONTROL_PLANE.md` | API, deployment, onboarding, and operating guide |
+
+### 14.2 Security boundaries
+
+- API authentication is mandatory unless `JOBHUNT_DASHBOARD_AUTH_DISABLED=1` is explicitly set for local tests.
+- Passwords, usernames, and profile values are encrypted using Fernet. APIs expose only completeness and masked usernames.
+- The public repository excludes the control DB, vault key, queue DB, sessions, profiles, resumes, and environment files.
+- Worker mutation endpoints accept only an exact allowlist of known systemd units and `start|stop|restart`; arguments are passed without a shell.
+- Queue/application queries are parameterized and open the live DB read-only except for non-destructive index migrations.
+- Repair snapshots never serialize DOM input values.
+
+### 14.3 Generic-site evolution
+
+The control plane is the onboarding and observability foundation. Generic automation should evolve beneath it in this order:
+
+1. `sites` records become declarative site manifests.
+2. Domain detection maps sites to reusable ATS adapters (Greenhouse, Lever, Ashby, Workday, SmartRecruiters, generic HTML).
+3. A shared workflow engine owns page-state classification and typed actions (`login`, `search`, `open_job`, `apply`, `fill`, `review`, `submit`).
+4. Portal workers become thin adapter runners instead of independent control-flow implementations.
+5. Readiness combines profile fields, answer-bank coverage, résumé availability, session probes, adapter capability, and network reachability.
+6. Unknown questions and UI drift become typed review issues surfaced in the web UI.
+7. Only verified postconditions write `applications.status='submitted'`.
+
+The first additive migration in that phase must add append-only attempt/run history, claim leases, retry metadata, normalized outcome codes, worker heartbeats, readiness-check records, artifact retention metadata, and metric rollups. The current tables stay readable during migration so live workers continue uninterrupted.
+
+This prevents the dashboard from becoming a cosmetic wrapper around duplicated portal scripts.

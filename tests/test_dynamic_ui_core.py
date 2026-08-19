@@ -69,3 +69,9 @@ def test_submit_candidate_is_rejected_for_untrusted_llm_source():
         dynamic_ui.validate_action_candidate(
             {"candidate_id": "c0"}, controls, intent="submit", source="llm"
         )
+
+
+def test_agent_snapshot_script_never_reads_dom_values():
+    source = Path(dynamic_ui.__file__).read_text(encoding="utf-8")
+    snapshot_block = source.split("def snapshot_a11y", 1)[1].split("def report_miss", 1)[0]
+    assert ".value" not in snapshot_block

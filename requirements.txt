@@ -5,3 +5,6 @@ requests>=2.34,<3
 beautifulsoup4>=4.15,<5
 pypdf>=6,<7
 cryptography>=50,<51
+fastapi>=0.133,<1
+uvicorn[standard]>=0.41,<1
+psutil>=7.2,<8

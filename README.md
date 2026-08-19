@@ -10,6 +10,23 @@ Sites change their UI every week. Hardcoded `button.easy-apply` **will** rot. Th
 
 Humans set identity + sessions. Agents run, watch, and repair.
 
+## Web control plane
+
+The repository now includes a responsive FastAPI control plane for people who should not need to operate Python scripts, SQLite, or systemd directly.
+
+- add websites and select/auto-detect ATS adapters;
+- store credentials and applicant profile fields encrypted at rest;
+- see exactly what setup information is missing;
+- monitor queues, confirmed submissions, workers, CPU/memory, restarts, and retained uptime samples;
+- inspect grouped issues and redacted application history;
+- restart only exact allowlisted worker units.
+
+```bash
+JOBHUNT_DASHBOARD_AUTH_DISABLED=1 uvicorn controlplane.app:app --host 127.0.0.1 --port 8787
+```
+
+Production must use Basic Auth and tailnet/firewall exposure. See [docs/CONTROL_PLANE.md](docs/CONTROL_PLANE.md) for the stack, APIs, deployment, security boundaries, and generic-ATS roadmap. The complete system blueprint is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ---
 
 ## How it fits together

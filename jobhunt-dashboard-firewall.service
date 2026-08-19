@@ -1,0 +1,13 @@
+[Unit]
+Description=Tailnet-only firewall for Auto Apply dashboard
+Before=jobhunt-dashboard.service
+After=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStartPre=-/usr/sbin/nft delete table inet jobhunt_dashboard
+ExecStart=/usr/sbin/nft -f /etc/jobhunt/dashboard-firewall.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

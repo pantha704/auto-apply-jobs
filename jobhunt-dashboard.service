@@ -1,0 +1,32 @@
+[Unit]
+Description=Auto Apply Jobs web control plane
+After=network-online.target jobhunt-dashboard-firewall.service
+Wants=network-online.target
+Requires=jobhunt-dashboard-firewall.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/job_hunt_linkedin
+EnvironmentFile=-/etc/jobhunt/job-hunt.env
+Environment=JOBHUNT_QUEUE_DB=/var/lib/jobhunt/apply_queue.db
+Environment=JOBHUNT_CONTROL_DB=/var/lib/jobhunt/controlplane.db
+Environment=JOBHUNT_VAULT_KEY=/etc/jobhunt/controlplane.key
+Environment=JOBHUNT_PROFILE_BOOTSTRAP=1
+ExecStart=/home/ubuntu/jobhunt-venv/bin/uvicorn controlplane.app:app --host 0.0.0.0 --port 8787 --workers 1 --proxy-headers
+Restart=on-failure
+RestartSec=5
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/jobhunt
+ReadOnlyPaths=/var/lib/jobhunt/apply_queue.db
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

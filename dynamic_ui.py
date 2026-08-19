@@ -202,14 +202,14 @@ def _llm_transport(body: dict) -> dict:
     key = os.environ.get("GROQ_API_KEY") or os.environ.get("UI_LLM_API_KEY")
     if not key or os.environ.get("UI_LLM") == "0":
         return {"none": True}
-    base = os.environ.get("UI_LLM_BASE", "https://api.groq.com/openai/v1").rstrip("/")
+    endpoint = "https://api.groq.com/openai/v1/chat/completions"
     req = urllib.request.Request(
-        base + "/chat/completions",
+        endpoint,
         data=json.dumps(body).encode(),
         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
         method="POST",
     )
-    raw = json.loads(urllib.request.urlopen(req, timeout=12).read().decode())
+    raw = json.loads(urllib.request.urlopen(req, timeout=12).read().decode())  # nosec B310: fixed HTTPS Groq endpoint
     return json.loads(raw["choices"][0]["message"]["content"])
 
 
@@ -255,7 +255,7 @@ def snapshot_a11y(page, limit: int = 80) -> list[dict[str, Any]]:
     """Compact accessibility inventory for an agent (no full HTML)."""
     try:
         return page.evaluate(
-            """(limit) => {
+            r"""(limit) => {
               const roles = ['button','link','textbox','combobox','radio','checkbox','tab','menuitem'];
               const out = [];
               const walk = (root) => {
@@ -263,12 +263,22 @@ def snapshot_a11y(page, limit: int = 80) -> list[dict[str, Any]]:
                 for (const el of nodes) {
                   if (out.length >= limit) return;
                   const r = el.getAttribute('role') || el.tagName.toLowerCase();
-                  const name = (el.getAttribute('aria-label') || el.innerText || el.value || '').trim().slice(0, 80);
+                  // Form controls use labels/placeholders only; never values or rendered answers.
+                  const isForm = ['input','textarea','select'].includes(el.tagName.toLowerCase());
+                  const raw = isForm
+                    ? (el.getAttribute('aria-label') || el.labels?.[0]?.innerText || el.getAttribute('placeholder') || '')
+                    : (el.getAttribute('aria-label') || el.innerText || '');
+                  const redact = (text) => text.trim().slice(0, 80)
+                    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[REDACTED_EMAIL]')
+                    .replace(/(?:\+?\d[\d\s().-]{7,}\d)/g, '[REDACTED_PHONE]')
+                    .replace(/\b\d{4,8}\b/g, '[REDACTED_NUMBER]')
+                    .replace(/https?:\/\/\S+/g, '[REDACTED_URL]');
+                  const name = redact(raw);
                   if (!name && r === 'div') continue;
                   const box = el.getBoundingClientRect();
                   if (box.width < 2 || box.height < 2) continue;
                   out.push({role: r, name, tag: el.tagName.toLowerCase(),
-                            testid: el.getAttribute('data-test') || el.getAttribute('data-testid') || ''});
+                            testid: redact(el.getAttribute('data-test') || el.getAttribute('data-testid') || '')});
                 }
               };
               walk(document);
@@ -286,14 +296,22 @@ def report_miss(page, portal: str, intent: str, url: str = "") -> str:
     ts = time.strftime("%Y%m%d_%H%M%S")
     png = os.path.join(INBOX, f"{portal}_{intent}_{ts}.png")
     meta = os.path.join(INBOX, f"{portal}_{intent}_{ts}.json")
+    blur_style = None
     try:
+        blur_style = page.add_style_tag(content="input,textarea,select,[contenteditable='true']{filter:blur(10px)!important;color:transparent!important}")
         page.screenshot(path=png, full_page=False)
     except Exception:
         png = ""
+    finally:
+        if blur_style is not None:
+            try:
+                blur_style.evaluate("el => el.remove()")
+            except Exception:
+                pass
     rec = {
         "portal": portal,
         "intent": intent,
-        "url": url or getattr(page, "url", ""),
+        "url": (url or getattr(page, "url", "")).split("?", 1)[0].split("#", 1)[0],
         "ts": ts,
         "a11y": snapshot_a11y(page),
         "screenshot": png,

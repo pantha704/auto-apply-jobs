@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ApplyPilot Control Plane</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235e6ad2'/%3E%3Cpath d='M9 23 16 8l7 15-7-4z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><span class="mark">A</span><span>ApplyPilot</span></div>
+    <nav id="nav">
+      <button class="nav-item active" data-page="overview"><span>⌁</span>Overview</button>
+      <button class="nav-item" data-page="sites"><span>◎</span>Sites</button>
+      <button class="nav-item" data-page="onboarding"><span>◇</span>Onboarding</button>
+      <button class="nav-item" data-page="workers"><span>⌘</span>Workers</button>
+      <button class="nav-item" data-page="issues"><span>△</span>Issues <b id="issue-count" class="nav-count">0</b></button>
+      <button class="nav-item" data-page="history"><span>↻</span>History</button>
+    </nav>
+    <div class="sidebar-foot"><span class="pulse"></span><span id="connection-label">Connecting</span><small>Control plane</small></div>
+  </aside>
+
+  <main>
+    <header class="topbar"><button id="mobile-menu" class="icon-btn">☰</button><div><p class="eyebrow">AUTO-APPLY SYSTEM</p><h1 id="page-title">Overview</h1></div><div class="top-actions"><span id="last-refresh" class="muted mono"></span><button class="btn" id="refresh">Refresh</button><button class="btn primary" data-go="onboarding">Complete setup</button></div></header>
+
+    <section id="page-overview" class="page active">
+      <div id="readiness-banner" class="banner"></div>
+      <div class="metric-grid">
+        <article class="metric"><span>Confirmed applications</span><strong id="m-confirmed">—</strong><small id="m-last-submit">No data</small></article>
+        <article class="metric"><span>Pending jobs</span><strong id="m-pending">—</strong><small id="m-claimed">— claimed</small></article>
+        <article class="metric"><span>Active workers</span><strong id="m-workers">—</strong><small id="m-restarts">— restarts</small></article>
+        <article class="metric"><span>Readiness</span><strong id="m-readiness">—</strong><small id="m-sites">— sites configured</small></article>
+      </div>
+      <div class="split">
+        <article class="panel"><div class="panel-head"><div><h2>Queue by portal</h2><p>Live work distribution</p></div><span class="live-tag"><i></i>LIVE</span></div><div id="portal-bars" class="bar-list skeleton-block"></div></article>
+        <article class="panel"><div class="panel-head"><div><h2>Needs attention</h2><p>Blocking setup and operational issues</p></div><button class="link-btn" data-go="issues">View all</button></div><div id="overview-issues" class="issue-list skeleton-block"></div></article>
+      </div>
+      <article class="panel"><div class="panel-head"><div><h2>Worker fleet</h2><p>Health, resource use, and restart history</p></div><button class="link-btn" data-go="workers">Manage</button></div><div id="worker-preview" class="table-wrap"></div></article>
+    </section>
+
+    <section id="page-sites" class="page">
+      <div class="section-actions"><div><h2>Application websites</h2><p>Add a career portal once. The system detects its ATS and checks login readiness.</p></div><button class="btn primary" id="add-site-open">+ Add website</button></div>
+      <div id="sites-grid" class="site-grid"></div>
+      <div id="site-form-card" class="panel form-panel hidden">
+        <div class="panel-head"><div><h2>Add a website</h2><p>Secrets are encrypted locally and never returned by the API.</p></div><button class="icon-btn" id="add-site-close">×</button></div>
+        <form id="site-form" class="form-grid">
+          <label><span>Display name</span><input name="name" required minlength="2" placeholder="Acme Careers"></label>
+          <label><span>Jobs URL</span><input name="base_url" required type="url" placeholder="https://careers.example.com/jobs"></label>
+          <label><span>Adapter</span><select name="adapter"><option value="auto">Auto-detect</option><option>greenhouse</option><option>lever</option><option>ashby</option><option>workday</option><option>smartrecruiters</option><option>generic</option><option>linkedin</option><option>wellfound</option></select></label>
+          <label><span>Authentication</span><select name="auth_type" id="auth-type"><option value="none">No login</option><option value="password">Username + password</option><option value="session">Existing browser session</option></select></label>
+          <label class="auth-password hidden"><span>Username / email</span><input name="username" autocomplete="username"></label>
+          <label class="auth-password hidden"><span>Password</span><input name="password" type="password" autocomplete="new-password"></label>
+          <label class="auth-session hidden wide"><span>Session profile reference</span><input name="session_ref" placeholder="profiles/acme"></label>
+          <div class="wide form-actions"><button type="button" class="btn" id="site-cancel">Cancel</button><button class="btn primary">Save and validate</button></div>
+        </form><p id="site-form-error" class="form-error"></p>
+      </div>
+    </section>
+
+    <section id="page-onboarding" class="page">
+      <div class="onboarding-head"><div><p class="eyebrow">GUIDED SETUP</p><h2>Tell the system what it may use</h2><p>We flag missing fields before a worker reaches an application form. Unknown answers are never invented.</p></div><div id="profile-progress" class="progress-ring">0%</div></div>
+      <div class="onboarding-layout">
+        <form id="profile-form" class="panel form-grid">
+          <label><span>Full name</span><input name="full_name" required></label><label><span>Email</span><input name="email" type="email" required></label>
+          <label><span>Phone</span><input name="phone" required></label><label><span>City</span><input name="city" required></label>
+          <label><span>Country</span><input name="country" required value="India"></label><label><span>Years of experience</span><input name="years_experience" type="number" min="0" max="60" step="0.5" required></label>
+          <label><span>Work authorization</span><input name="work_authorization" required placeholder="India"></label><label><span>Sponsorship required</span><select name="sponsorship_required"><option value="true">Yes</option><option value="false">No</option></select></label>
+          <div class="wide privacy-note">🔒 Profile values are encrypted at rest. Status APIs expose completeness only.</div>
+          <div class="wide form-actions"><button class="btn primary">Save applicant profile</button></div>
+        </form>
+        <aside><article class="panel"><h3>Readiness checklist</h3><div id="readiness-list" class="check-list"></div></article><article class="panel tip"><h3>Operating principle</h3><p>A job is marked submitted only after confirmation evidence. Missing or unfamiliar questions pause for review.</p></article></aside>
+      </div>
+    </section>
+
+    <section id="page-workers" class="page"><div class="section-actions"><div><h2>Worker fleet</h2><p>Live systemd state, resource use, restarts, and controls.</p></div><span class="live-tag"><i></i>LIVE</span></div><div id="workers-table" class="panel table-wrap"></div></section>
+    <section id="page-issues" class="page"><div class="section-actions"><div><h2>Issues and remediation</h2><p>Setup blockers and grouped operational failure patterns.</p></div></div><div id="blocking-issues" class="issue-list"></div><article class="panel"><div class="panel-head"><div><h2>Operational patterns</h2><p>Grouped skips from the live queue</p></div></div><div id="operational-table" class="table-wrap"></div></article></section>
+    <section id="page-history" class="page"><div class="section-actions"><div><h2>Application history</h2><p>Audited outcomes; sensitive answer payloads are excluded.</p></div><div><select id="history-status"><option value="">All statuses</option><option value="submitted">Confirmed submitted</option><option value="applied">Applied</option><option value="submitted-unconfirmed">Unconfirmed</option></select></div></div><div id="history-table" class="panel table-wrap"></div></section>
+  </main>
+</div>
+<div id="toast" class="toast"></div>
+<script src="/static/app.js"></script>
+</body></html>
