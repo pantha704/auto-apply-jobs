@@ -6,7 +6,7 @@ This system is **dynamic**. Portal UIs change without notice. You are the runtim
 Worker scripts are a **fast path**, not a finished bot. When the page does not
 match an intent, you repair the intent map (or the flow) and continue.
 
-Browser stack is **CloakBrowser non-pro + Playwright** (Python driver + CloakBrowser MCP + Playwright MCP). Not stock Chromium. See `docs/STACK.md`.
+Browser stack is **CloakBrowser non-pro + Playwright**, with Browser Use for bounded discovery/recovery. Playwright CLI/API is the deterministic executor; CloakBrowser MCP and Playwright MCP are optional deep-diagnostic surfaces. Not stock Chromium. See `docs/STACK.md`.
 
 Read in this order:
 
@@ -105,7 +105,7 @@ Workers use `dynamic_ui.click(intent)` for navigation and submit controls. A mis
 
 Optional **cheap UI LLM** (recommended: Groq `llama-3.1-8b-instant`): set `GROQ_API_KEY` only in the private host environment. On a low-risk intent miss, the sanitized actionable-control inventory is sent without textbox values, cookies, profile data, URLs with tokens, or screenshots. The model may return only a known `candidate_id`; it can never return CSS/XPath and can never select `submit`/`send`.
 
-Selectors are learned only after an agent/human change is followed by a verified postcondition. `UI_LLM=0` disables the fallback. Any OpenAI-compatible host uses `UI_LLM_BASE` + `UI_LLM_API_KEY`.
+Selectors are learned only after an agent/human change is followed by a verified postcondition. `UI_LLM=0` disables the fallback. The bounded picker uses the fixed Groq HTTPS endpoint; arbitrary endpoint overrides are intentionally unsupported.
 Do **not** send profile/CTC to this model. Do **not** let it fill forms or submit applications.
 
 ---

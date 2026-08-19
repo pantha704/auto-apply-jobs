@@ -32,22 +32,25 @@ Production must use Basic Auth and tailnet/firewall exposure. See [docs/CONTROL_
 ## How it fits together
 
 ```
- you (once)                    agent loop (ongoing)
- ┌──────────────┐              ┌─────────────────────────────┐
- │ profile_local│              │ 1 collect → inject queue    │
- │ resume.pdf   │              │ 2 workers claim + apply     │
- │ portal login │─────────────▶│ 3 audit / skip honestly     │
- └──────────────┘              │ 4 UI break? → screenshot    │
-                               │ 5 agent patches intent map  │
-                               │ 6 requeue + continue        │
-                               └─────────────┬───────────────┘
-                                             ▼
-                                    apply_queue.db
-                                    applications (truth)
-                                    learned/selectors.json
+ applicant setup                  workflow router
+ ┌──────────────┐        ┌─────────────────────────────────────┐
+ │ profile truth│        │ verified recipe → Playwright fast   │
+ │ resume       │───────▶│ drift/unknown → Browser Use discover│
+ │ portal login │        │ deep repair → MCP diagnostics       │
+ └──────────────┘        └──────────────────┬──────────────────┘
+                                            ▼
+                                   CloakBrowser over CDP
+                                            │
+                          verify postcondition + atomic audit
+                                            ▼
+                            /var/lib/jobhunt/apply_queue.db
+                               applications (source of truth)
+                               versioned learned recipes
 ```
 
-**Do not treat worker `*.py` as a finished bot.** Treat them as a fast path. The README + `docs/AGENT_LOOP.md` are how a stranger (or Hermes / Claude Code / Codex / OpenCode) actually operates the farm.
+The deployed workers currently use Python Playwright with CloakBrowser plus the intent layer in `dynamic_ui.py`. The Browser Use router and recipe compiler shown above are the **target architecture under implementation**, not a claim that every worker has already migrated. Known workflows stay deterministic; Browser Use is reserved for discovery and recovery; MCP is the supervised diagnostic escalation path.
+
+**Do not treat worker `*.py` as a finished universal bot.** Treat them as current fast paths being migrated behind the shared workflow contract. The README + `docs/AGENT_LOOP.md` are how a stranger (or Hermes / Claude Code / Codex / OpenCode) operates the farm.
 
 ---
 
@@ -59,7 +62,8 @@ Production must use Basic Auth and tailnet/firewall exposure. See [docs/CONTROL_
 | Python 3.11+ | venv + `pip install playwright` (**driver only**) |
 | **CloakBrowser non-pro** | Binary at `~/.cloakbrowser/chromium-<ver>/chrome`. **Not** stock Chromium. |
 | Playwright Python | Wires to Cloak via `executable_path=CLOAK`. Do **not** `playwright install chromium`. |
-| Agent MCPs | CloakBrowser MCP (`npx -y cloakbrowser-mcp@latest`) **and** Playwright MCP (`browser_*` / `playwright-mcp`) |
+| Browser execution | CloakBrowser is the only Chromium implementation. Python Playwright runs verified recipes; Browser Use over loopback CDP is the planned discovery/recovery layer. |
+| Agent tooling | Playwright CLI + skills for token-efficient inspection/replay. CloakBrowser MCP and Playwright MCP are optional deep-diagnostic tools, not equal primary executors. |
 | An **agent** | Hermes, Claude Code, Codex, OpenCode — must read docs/AGENT_INSTRUCTIONS.md |
 | Optional | systemd, 5‑min watchdog cron, `GROQ_API_KEY` |
 
@@ -79,7 +83,8 @@ pip install -r requirements-dev.txt
 # Do not run `playwright install`; CloakBrowser supplies the executable.
 # Install CloakBrowser non-pro, then:
 export CLOAK="$HOME/.cloakbrowser/chromium-<version>/chrome"
-# Agent host: enable CloakBrowser MCP AND Playwright MCP
+# Optional diagnostics: enable CloakBrowser MCP / Playwright MCP.
+# The target router attaches Browser Use and Playwright CLI to CloakBrowser over loopback CDP.
 
 # Pure public-clone verification (no live profile, cookies, queue, or portal):
 python -m pytest -q
@@ -109,12 +114,14 @@ Example kickoff prompt:
 
 > You are operating auto-apply-jobs. Read README.md and docs/AGENT_LOOP.md.
 > Do not hardcode new CSS classes as the only path.
-> Collect → inject → run workers → if a portal UI drifted, screenshot +
-> accessibility snapshot, update learned/selectors.json (intent → role/name/text),
-> patch the worker only if the intent map is not enough, requeue those jobs,
-> commit the learning. Never invent form answers. Never commit secrets.
+> Collect → inject → run a verified recipe. On drift, gather a privacy-safe
+> candidate inventory and use Browser Use only for discovery/recovery through
+> CloakBrowser. Require typed actions and a portal postcondition, then compile
+> the proven sequence into a versioned deterministic recipe. Never let a model
+> invent answers, select submit/send, or mark an application submitted. Never
+> commit secrets.
 
-That is how the farm **self-learns**: each UI break becomes a checked-in intent, not a one-off “fix it in chat”.
+That is how the farm **self-learns**: each UI break becomes a postcondition-verified recipe revision, not a one-off “fix it in chat”.
 
 ### What the agent is allowed to change
 - `learned/selectors.json` — intent keys (`apply`, `submit`, `dismiss_consent`, `easy_apply`, …)
@@ -200,11 +207,11 @@ Naukri is parked (Akamai from datacenter IPs).
 3. **[docs/AGENT_LOOP.md](docs/AGENT_LOOP.md)** — UI repair tick  
 4. GitNexus: `node .gitnexus/run.cjs analyze` then `query` / `impact` / `context`
 
-Optional cheap UI brain: set `GROQ_API_KEY`. `dynamic_ui` will ask Groq
-`llama-3.1-8b-instant` (~$0.05/$0.08 per M tokens) **only** to pick a visible
-control when the intent map misses. Hits are written back to
-`learned/selectors.json`. Never used for form answers. `UI_LLM=0` disables it.
-Any OpenAI-compatible endpoint works (`UI_LLM_BASE` + `UI_LLM_API_KEY`).
+Optional bounded UI picker: set `GROQ_API_KEY`. `dynamic_ui` sends only a
+privacy-sanitized candidate inventory to the fixed Groq HTTPS endpoint and
+accepts only a known candidate ID or `none`. It is never used for answers or
+submit/send decisions. `UI_LLM=0` disables it. Arbitrary endpoint overrides
+are intentionally unsupported so a bearer key cannot be redirected.
 
 ---
 

@@ -49,6 +49,32 @@ Nothing here is a closed-world UI script. Clicks go through **intent**
 (`dynamic_ui` + `learned/selectors.json`). When the page lies, the agent
 updates the map. See `docs/AGENT_LOOP.md`.
 
+### 1.1 Target dynamic execution architecture
+
+The current portal workers are being migrated behind a shared router. The
+target hierarchy is deliberately asymmetric:
+
+```text
+verified deterministic recipe
+  -> Python Playwright / Playwright CLI
+  -> CloakBrowser CDP
+
+recipe miss or unknown site
+  -> Browser Use discovery (sanitized candidates only)
+  -> typed proposed actions
+  -> deterministic execution + portal postcondition
+  -> versioned recipe compiled only after proof
+
+deep ambiguous failure
+  -> Playwright MCP / CloakBrowser MCP diagnostic session
+  -> local needs-agent issue when proof is unavailable
+```
+
+Browser Use is the discovery/recovery brain, CloakBrowser is the browser and
+fingerprint layer, and Playwright is the precision executor. MCP is not a
+peer execution strategy; it is an explicit diagnostic escalation. One lease
+owner controls a browser session at a time.
+
 ---
 
 ## 2. Data plane
@@ -112,7 +138,7 @@ Naukri harvest may return cards; **applying** Naukri from a datacenter IP is par
 
 ## 4. Workers (apply plane)
 
-All workers: **CloakBrowser non-pro** driven by **Playwright Python** (`launch_persistent_context(..., executable_path=CLOAK)`). `p.chromium` is Playwright’s protocol name — the process is Cloak, not stock Chromium. Do not `playwright install chromium`. `TMPDIR` on **real disk** (tmpfs kills Cloak). `BrowserWatchdog` (~240s) so a wedged CDP pipe cannot hang forever. Agents repair UIs via **CloakBrowser MCP** + **Playwright MCP**, not by launching Google Chrome. Full stack: `docs/STACK.md`.
+All current workers: **CloakBrowser non-pro** driven by **Playwright Python** (`launch_persistent_context(..., executable_path=CLOAK)`). `p.chromium` is Playwright’s protocol name — the process is Cloak, not stock Chromium. Do not `playwright install chromium`. `TMPDIR` stays on **real disk** (tmpfs kills Cloak). `BrowserWatchdog` (~240s) prevents a wedged CDP pipe from hanging forever. The target router uses Browser Use for unknown-state discovery, Playwright CLI/API for deterministic replay, and CloakBrowser/Playwright MCP only for supervised deep repair. Full stack: `docs/STACK.md`.
 
 They must **sleep on empty**, not `sys.exit`. Exit + `Restart=always` = restart storm (YC bug, fixed). Internshala daily cap counts **today’s** `applications` rows, not lifetime `jobs` applies.
 
@@ -335,7 +361,7 @@ collectors ─► apply_queue.db ─► CloakBrowser/Playwright workers ─► a
 
 ### 14.3 Generic-site evolution
 
-The control plane is the onboarding and observability foundation. Generic automation should evolve beneath it in this order:
+The control plane is the deployed onboarding and observability foundation. Generic automation evolves beneath it in this order:
 
 1. `sites` records become declarative site manifests.
 2. Domain detection maps sites to reusable ATS adapters (Greenhouse, Lever, Ashby, Workday, SmartRecruiters, generic HTML).
@@ -343,7 +369,19 @@ The control plane is the onboarding and observability foundation. Generic automa
 4. Portal workers become thin adapter runners instead of independent control-flow implementations.
 5. Readiness combines profile fields, answer-bank coverage, résumé availability, session probes, adapter capability, and network reachability.
 6. Unknown questions and UI drift become typed review issues surfaced in the web UI.
-7. Only verified postconditions write `applications.status='submitted'`.
+7. The router tries a verified recipe first, then bounded deterministic recovery, then Browser Use discovery over loopback CloakBrowser CDP.
+8. Successful discoveries are compiled into versioned recipes only after a portal-specific postcondition and atomic audit succeed.
+9. Playwright CLI becomes the token-efficient inspection/replay surface; MCP remains an opt-in deep-diagnostic surface.
+10. A browser-session lease prevents Browser Use, Playwright, and MCP from mutating the same page concurrently.
+
+### Non-negotiable truth and privacy invariants
+
+- A click, page transition, worker exit, or `jobs.status='done'` is never proof of submission.
+- Only portal confirmation evidence plus an atomic `applications` audit may produce `submitted`.
+- Models receive no cookies, input values, resume contents, full HTML, private URL queries, emails, phone numbers, OTPs, or tokens.
+- Models may select only from sanitized candidate IDs and may not choose `submit` or `send`.
+- Unknown form questions pause one run and surface the smallest operator action; answers are never invented.
+- Learning is written atomically only after the expected postcondition succeeds.
 
 The first additive migration in that phase must add append-only attempt/run history, claim leases, retry metadata, normalized outcome codes, worker heartbeats, readiness-check records, artifact retention metadata, and metric rollups. The current tables stay readable during migration so live workers continue uninterrupted.
 

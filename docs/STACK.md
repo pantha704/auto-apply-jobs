@@ -35,19 +35,19 @@ Both are part of the operator stack:
 
 | MCP | How | For |
 |---|---|---|
-| **CloakBrowser MCP** | `npx -y cloakbrowser-mcp@latest` (Hermes `mcp_servers.cloakbrowser`) | Agent-driven browse on the same Cloak engine (navigate, snapshot, click) |
-| **Playwright MCP** | `playwright-mcp` / Hermes `browser_*` toolset | A11y snapshots, repair sessions, `docs/AGENT_LOOP.md` drift work |
+| **Browser Use** | Skill/CLI attached to CloakBrowser over loopback CDP | Unknown-site discovery and bounded drift recovery |
+| **Playwright CLI** | `playwright-cli` + agent skills, attached over CDP | Token-efficient inspection, deterministic replay, traces, and recipe generation |
+| **CloakBrowser MCP** | `npx -y cloakbrowser-mcp@latest` (Hermes `mcp_servers.cloakbrowser`) | Optional deep diagnosis on the same Cloak engine |
+| **Playwright MCP** | `playwright-mcp` / Hermes `browser_*` toolset | Optional persistent a11y/repair sessions |
 
-Workers do **not** go through MCP. MCP is how an **agent** looks at a live page when the intent map misses.
+Workers do **not** use MCP as their normal execution path. A verified recipe runs through Playwright; Browser Use discovers unknown states; MCP is the final supervised diagnostic escalation.
 
 ## Install (operator)
 
 1. Install **CloakBrowser non-pro** for your OS. Confirm the `chrome` binary exists.
 2. Install the Python driver with `pip install -r requirements.txt` — **do not** run `playwright install chromium`.
 3. `export CLOAK=/path/to/cloakbrowser/.../chrome`
-4. Enable MCP in the agent host:
-   - CloakBrowser: `npx -y cloakbrowser-mcp@latest`
-   - Playwright MCP as provided by your host (Hermes `browser` toolset / `playwright-mcp`)
+4. For the target router, attach Browser Use and Playwright CLI to a loopback-only CloakBrowser CDP endpoint. Enable CloakBrowser MCP or Playwright MCP only when deep interactive diagnosis is required.
 
 ## Do not
 

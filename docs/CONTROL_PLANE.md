@@ -132,7 +132,7 @@ The FastAPI lifespan starts a one-minute worker sampler. It stores active state,
 3. **Reusable ATS adapters** — Greenhouse, Lever, Ashby, Workday, SmartRecruiters, generic HTML.
 4. **Workflow engine** — typed page states/actions, retries, leases, postconditions, review escalation.
 5. **Answer bank** — versioned, user-approved answers; unknown questions create issues.
-6. **Assisted login and repair** — copied browser profiles through CloakBrowser/Playwright MCP.
+6. **Assisted login and repair** — copied browser profiles through loopback CloakBrowser CDP, with MCP reserved for deep diagnostics.
 7. **Multi-user isolation** — tenant-scoped DB rows, vault keys, profiles, queues, audit retention.
 
 The next schema migration should introduce versioned migrations, `site_accounts`, `readiness_checks`, append-only `application_runs`/`job_attempts`, lease expiry and retry fields, worker-instance heartbeats, typed outcome codes, retained artifacts, and metric rollups. Existing `jobs` and `applications` remain compatibility projections until every worker uses the shared workflow engine.
