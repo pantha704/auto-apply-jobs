@@ -93,6 +93,36 @@ def test_deterministic_adapter_precedes_recovery():
     assert provider.requests == []
 
 
+def test_deterministic_replay_must_satisfy_available_postcondition():
+    candidate = ActionCandidate("field-1", "field", "Email address")
+    driver = FakeDriver([candidate])
+    result = RuntimeRouter(
+        driver, FakeLease(), GenericDeterministicAdapter(), StubRecovery(),
+        recovery_verifier=lambda context, trace: False,
+    ).run(context())
+    assert result.route is Route.OPERATOR
+    assert result.review_reason == "deterministic postcondition failed"
+
+
+def test_deterministic_plan_cannot_click_a_terminal_label_for_low_risk_intent():
+    class UnsafeSubstringAdapter:
+        name = "unsafe-substring"
+
+        def plan(self, candidates, context):
+            return (DriverAction("click", "save", "danger-1"),)
+
+    candidate = ActionCandidate(
+        "danger-1", "button", "Save and submit application"
+    )
+    driver = FakeDriver([candidate])
+    result = RuntimeRouter(
+        driver, FakeLease(), UnsafeSubstringAdapter(), StubRecovery()
+    ).run(context())
+    assert result.route is Route.OPERATOR
+    assert result.review_reason == "unsafe deterministic plan"
+    assert driver.executed == []
+
+
 def test_recovery_receives_only_sanitized_actionable_candidates_and_returns_trace():
     candidates = (
         ActionCandidate("mystery-1", "button", "Continue"),
@@ -115,6 +145,30 @@ def test_recovery_receives_only_sanitized_actionable_candidates_and_returns_trac
     payload = repr(provider.requests[0])
     assert "https://" not in payload
     assert "cookie" not in payload.lower()
+
+
+def test_recovery_preserves_the_callers_exact_low_risk_intent():
+    candidate = ActionCandidate("apply-1", "button", "Apply now")
+    driver = FakeDriver([candidate])
+    provider = StubRecovery([TraceAction("click", "apply", "apply-1", "button")])
+    result = RuntimeRouter(
+        driver, FakeLease(), GenericDeterministicAdapter(), provider,
+        recovery_verifier=lambda context, trace: True,
+    ).run(context(), recovery_intent="apply")
+    assert result.route is Route.RECOVERY
+    assert provider.requests[0].intent == "apply"
+
+
+def test_recovery_rejects_a_different_intent_than_requested():
+    candidate = ActionCandidate("other-1", "button", "Continue")
+    driver = FakeDriver([candidate])
+    provider = StubRecovery([TraceAction("click", "continue", "other-1", "button")])
+    result = RuntimeRouter(
+        driver, FakeLease(), GenericDeterministicAdapter(), provider,
+        recovery_verifier=lambda context, trace: True,
+    ).run(context(), recovery_intent="apply")
+    assert result.route is Route.OPERATOR
+    assert driver.executed == []
 
 
 def test_recovery_cannot_choose_or_execute_final_submit():

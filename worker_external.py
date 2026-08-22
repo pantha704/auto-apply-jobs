@@ -10,11 +10,14 @@ import json, os, re, sqlite3, sys, time, signal
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 from worker_guard import BrowserWatchdog
 import dynamic_ui
+from workflow.worker_telemetry import telemetry_for
 from title_filter import title_rejection_reason
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "ext-w1"
+QUEUE_DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
+STATE_ROOT = os.getenv("JOBHUNT_STATE_ROOT", os.path.join(HERE, "state_queue"))
 _worker_match = re.search(r"(\d+)$", WORKER_ID)
 CDP_PORT = int(os.environ.get("EXT_CDP_PORT", str(9380 + (int(_worker_match.group(1)) if _worker_match else 1))))
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
@@ -28,30 +31,36 @@ def sync_playwright():
     return _sync_playwright()
 
 def db():
-    return sqlite3.connect(os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db")))
+    return sqlite3.connect(QUEUE_DB)
+
+def telemetry():
+    return telemetry_for(WORKER_ID, "external", QUEUE_DB, STATE_ROOT)
 
 def claim():
     while True:
         c = db()
         row = c.execute("SELECT id, url, title, source FROM jobs WHERE portal='external' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
         if not row:
-            c.close(); return None
+            c.close(); telemetry().idle(); return None
         source = (row[3] or "").lower()
         gate_source = "yc-job" if source == "yc" and "/jobs/" in (row[1] or "") else source
         reason = title_rejection_reason(row[2] or "", gate_source)
         if reason:
             c.execute("UPDATE jobs SET status='skip', result=? WHERE id=? AND status='pending'", (reason, row[0]))
             c.commit(); c.close()
+            telemetry().outcome(row[0], "skip", reason)
             continue
         upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
         c.commit(); c.close()
         if upd.rowcount == 1:
+            telemetry().claimed(row[0])
             return {"id": row[0], "url": row[1], "title": row[2], "source": row[3]}
 
 def mark(jid, status, result=""):
     c = db()
     c.execute("UPDATE jobs SET status=?, result=? WHERE id=?", (status, result[:200], jid))
     c.commit(); c.close()
+    telemetry().outcome(jid, status, result)
 
 def route(job):
     src = (job.get("source") or "").lower()
@@ -178,12 +187,15 @@ def himalayas_apply(url):
             # upsell interstitial
             if "i'm ready to apply" in low2 or "generate cover letter with ai" in low2:
                 try:
-                    try:
-                        dynamic_ui.click(page, "himalayas", "dismiss_upsell", timeout_ms=2000)
+                    if dynamic_ui.hybrid_click(
+                        page, "himalayas", "dismiss_upsell", CDP_URL,
+                        postcondition=lambda: "don't show this again" not in page.inner_text("body").lower(),
+                    ):
                         page.wait_for_timeout(600)
-                    except Exception:
-                        pass
-                    if not dynamic_ui.click(page, "himalayas", "ready", timeout_ms=4000):
+                    if not dynamic_ui.hybrid_click(
+                        page, "himalayas", "ready", CDP_URL,
+                        postcondition=lambda: page.locator("textarea, input[type=file]").count() > 0,
+                    ):
                         raise RuntimeError("upsell ready intent failed")
                     page.wait_for_timeout(5000)
                     b2 = page.inner_text("body")
@@ -226,7 +238,8 @@ def wwr_apply(url):
             ctx = p.chromium.launch_persistent_context(
                 user_data_dir=f"/tmp/ext_wwr_{WORKER_ID}", executable_path=CLOAK, headless=True,
                 args=["--no-first-run", "--no-default-browser-check", "--disable-blink-features=AutomationControlled",
-                      "--window-size=1400,900"])
+                      "--window-size=1400,900", "--remote-debugging-address=127.0.0.1",
+                      f"--remote-debugging-port={CDP_PORT}"])
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.set_default_timeout(15000)
             page.set_default_navigation_timeout(25000)
@@ -248,14 +261,21 @@ def wwr_apply(url):
             if apply_href:
                 if apply_href.startswith("mailto:"):
                     ctx.close()
-                    return (True, f"email-apply:{apply_href[:60]}")
+                    return (False, "email-apply-needs-contact-ingest")
                 low_h = apply_href.lower()
                 # WWR "Apply" often points at their career-services upsell, not the job.
                 if any(x in low_h for x in ("job-copilot", "career-services", "career_services", "/pricing")):
                     ctx.close()
                     return (False, "wwr-upsell-not-apply")
                 try:
-                    page.goto(apply_href, wait_until="domcontentloaded", timeout=30000)
+                    if not dynamic_ui.hybrid_click(
+                        page, "weworkremotely", "apply", CDP_URL,
+                        postcondition=lambda: page.url != url or len(ctx.pages) > 1,
+                    ):
+                        ctx.close()
+                        return (False, "no-apply-btn")
+                    if len(ctx.pages) > 1:
+                        page = ctx.pages[-1]
                     page.wait_for_timeout(3000)
                     if "login" in page.url or "sign in" in page.url:
                         ctx.close()
@@ -264,10 +284,10 @@ def wwr_apply(url):
                         ctx.close()
                         return (False, "wwr-upsell-not-apply")
                     ctx.close()
-                    return (True, f"external-apply:{apply_href[:70]}")
+                    return (False, "external-ats-route-required")
                 except Exception:
                     ctx.close()
-                    return (True, f"external-apply:{apply_href[:70]}")
+                    return (False, "external-apply-navigation-unknown")
             ctx.close()
             return (False, "no-apply-link")
     except Exception as e:

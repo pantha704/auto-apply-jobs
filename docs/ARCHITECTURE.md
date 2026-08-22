@@ -350,7 +350,37 @@ collectors ─► apply_queue.db ─► CloakBrowser/Playwright workers ─► a
 | `jobhunt-dashboard.sudoers` | Exact worker start/stop/restart commands; no wildcard units |
 | `docs/CONTROL_PLANE.md` | API, deployment, onboarding, and operating guide |
 
-### 14.2 Security boundaries
+### 14.2 Canonical worker telemetry
+
+`apply_queue.db` is the source of truth for worker runtime state and history through
+`worker_instances` and `worker_events` (queue migration 2). Every worker records a
+machine-code-only lifecycle projection: start, claim, active heartbeat, terminal
+outcome, idle, or blocked. Queue depth is calculated from canonical queue rows.
+
+For operator inspection, each worker also writes private projections under
+`state_queue/<adapter>/<worker-id>/status.json` and `events.jsonl`. Directories are
+`0700`, files are `0600`, status replacement is atomic, and JSONL is append-only.
+These projections contain no URLs, email addresses, message/application bodies,
+cookies, credentials, tokens, page content, job titles, or free-form exceptions.
+Deleting them is safe because SQLite remains canonical.
+
+The Workers API joins systemd state with canonical runtime state, current claim,
+queue depth, heartbeat, last success, and recent machine-code outcomes. LinkedIn
+may appear inactive by design when its saved session is authwall/challenge gated.
+
+Cold email uses a separate control-database send queue but emits the same worker
+runtime projection. It checks official Gmail API readiness before claiming, needs
+explicit approval for the exact draft, records `sent` only with a Gmail message ID,
+and changes ambiguous stale in-flight sends to `unknown` rather than retrying.
+
+External-source extraction is intentionally owned by an authenticated n8n/API
+producer. The ingest endpoint is disabled until at least one typed source and an
+ingest token are configured. Do not deploy a generic unauthenticated crawler:
+`sheet`, `csv`, `html`, and `json` sources require source-specific extraction.
+Ingest classification and routing are transactional and never alter confirmed
+application counts.
+
+### 14.3 Security boundaries
 
 - API authentication is mandatory unless `JOBHUNT_DASHBOARD_AUTH_DISABLED=1` is explicitly set for local tests.
 - Passwords, usernames, and profile values are encrypted using Fernet. APIs expose only completeness and masked usernames.
@@ -359,7 +389,7 @@ collectors ─► apply_queue.db ─► CloakBrowser/Playwright workers ─► a
 - Queue/application queries are parameterized and open the live DB read-only except for non-destructive index migrations.
 - Repair snapshots never serialize DOM input values.
 
-### 14.3 Generic-site evolution
+### 14.4 Generic-site evolution
 
 The control plane is the deployed onboarding and observability foundation. Generic automation evolves beneath it in this order:
 

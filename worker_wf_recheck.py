@@ -28,7 +28,7 @@ def claim_unconfirmed():
         "SELECT id, url, title FROM jobs WHERE portal='wellfound' AND status='skip' "
         "AND result LIKE 'submit-unconfirmed%' ORDER BY rowid LIMIT 1").fetchone()
     if not row:
-        c.close(); return None
+        c.close(); ww.telemetry().idle(safe_detail="no-submit-unconfirmed"); return None
     upd = c.execute(
         "UPDATE jobs SET status='claimed', claimed_by=?, result='rechecking' "
         "WHERE id=? AND status='skip' AND result LIKE 'submit-unconfirmed%'",
@@ -36,6 +36,7 @@ def claim_unconfirmed():
     c.commit(); c.close()
     if upd.rowcount != 1:
         return claim_unconfirmed()
+    ww.telemetry().claimed(row[0])
     return {"id": row[0], "url": row[1], "title": row[2]}
 
 def main():

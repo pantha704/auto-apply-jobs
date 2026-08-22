@@ -8,6 +8,10 @@
     "apply": [
       { "role": "button", "name": "Apply" }
     ],
+    "login": [
+      { "role": "button", "name": "Log In" },
+      { "role": "link", "name": "Log In" }
+    ],
     "submit": [
       { "role": "button", "name": "Submit" },
       { "role": "button", "name": "Send" }
@@ -22,6 +26,12 @@
     ],
     "review": [
       { "role": "button", "name": "Review" }
+    ],
+    "save": [
+      { "role": "button", "name": "Save" }
+    ],
+    "add_work_experience": [
+      { "role": "button", "name": "Add work experience" }
     ],
     "submit": [
       { "role": "button", "name": "Submit application" }

@@ -65,7 +65,8 @@ class RuntimeRouter:
         self.recovery_mode = recovery_mode
 
     def run(
-        self, context: RuntimeContext, *, recipe: VerifiedRecipe | None = None
+        self, context: RuntimeContext, *, recipe: VerifiedRecipe | None = None,
+        recovery_intent: str = "recover_navigation",
     ) -> RoutingResult:
         with self.lease.acquire(context.session_id):
             if recipe is not None and recipe.verified:
@@ -74,7 +75,31 @@ class RuntimeRouter:
 
             candidates = tuple(self.driver.inspect(context.url))
             deterministic = self.adapter.plan(candidates, context)
+            deterministic_candidates = {item.candidate_id: item for item in candidates}
+            if deterministic and any(
+                action.target_id not in deterministic_candidates
+                or TraceAction(
+                    action.action_type,
+                    action.intent,
+                    action.target_id,
+                    deterministic_candidates[action.target_id].role,
+                ).risk_for(deterministic_candidates[action.target_id]) is ActionRisk.TERMINAL
+                for action in deterministic
+            ):
+                return RoutingResult(Route.OPERATOR, review_reason="unsafe deterministic plan")
             if deterministic and self.driver.replay(deterministic):
+                if self.recovery_verifier is not None:
+                    try:
+                        if not self.recovery_verifier(context, ()):
+                            return RoutingResult(
+                                Route.OPERATOR,
+                                review_reason="deterministic postcondition failed",
+                            )
+                    except Exception:
+                        return RoutingResult(
+                            Route.OPERATOR,
+                            review_reason="deterministic postcondition failed",
+                        )
                 return RoutingResult(Route.DETERMINISTIC)
 
             if self.recovery_provider is None or self.recovery_mode == "disabled":
@@ -83,7 +108,7 @@ class RuntimeRouter:
             request = sanitized_request(
                 candidates,
                 site_id=context.session_id.split(":", 1)[0],
-                intent="recover_navigation",
+                intent=recovery_intent,
             )
             if not request.candidates:
                 return RoutingResult(Route.OPERATOR, review_reason="no actionable candidates")
@@ -100,6 +125,7 @@ class RuntimeRouter:
                 action.candidate_id not in candidate_map
                 or candidate_map[action.candidate_id].role != action.target_role
                 or action.risk_for(candidate_map[action.candidate_id]) is not ActionRisk.LOW
+                or (recovery_intent != "recover_navigation" and action.intent != recovery_intent)
                 for action in trace
             ):
                 return RoutingResult(Route.OPERATOR, review_reason="unsafe recovery plan")

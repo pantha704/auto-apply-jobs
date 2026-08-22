@@ -17,6 +17,7 @@ from worker_guard import BrowserWatchdog
 from playwright.sync_api import sync_playwright
 import audit
 import dynamic_ui
+from workflow.worker_telemetry import telemetry_for
 import jd_match
 from job_identity import stable_job_id
 from submission_signals import has_submission_confirmation
@@ -28,6 +29,8 @@ PROFILE = os.path.join(HERE, "profiles", "yc_cap")
 STATE = os.path.join(HERE, "portal_yc.json")
 RESUME = "/home/ubuntu/Documents/Pratham_Jaiswal_Updated_Resume.pdf"
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "yc-w1"
+QUEUE_DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
+STATE_ROOT = os.getenv("JOBHUNT_STATE_ROOT", os.path.join(HERE, "state_queue"))
 _worker_match = re.search(r"(\d+)$", WORKER_ID)
 CDP_PORT = int(os.environ.get("YC_CDP_PORT", str(9360 + (int(_worker_match.group(1)) if _worker_match else 1))))
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
@@ -44,19 +47,24 @@ def log(msg):
     print(f"[{WORKER_ID}] [{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def db():
-    return sqlite3.connect(os.path.join(HERE, "apply_queue.db"))
+    return sqlite3.connect(QUEUE_DB)
+
+def telemetry():
+    return telemetry_for(WORKER_ID, "yc", QUEUE_DB, STATE_ROOT)
 
 def claim():
     c = db()
     row = c.execute("SELECT id, url, title FROM jobs WHERE portal='yc' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
     if not row:
         c.close()
+        telemetry().idle()
         return None
     upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
     c.commit()
     c.close()
     if upd.rowcount != 1:
         return claim()
+    telemetry().claimed(row[0])
     return {"id": row[0], "url": row[1], "title": row[2]}
 
 def mark(jid, status, result=""):
@@ -64,6 +72,7 @@ def mark(jid, status, result=""):
     c.execute("UPDATE jobs SET status=?, result=? WHERE id=?", (status, result[:250], jid))
     c.commit()
     c.close()
+    telemetry().outcome(jid, status, result)
 
 def expand_company(page, job):
     """Company page -> enqueue its /jobs/ links, mark company done."""

@@ -268,6 +268,33 @@ def test_workflow_aliases_match_public_overview_sites_workers(dashboard):
     assert alias_workers.json() == workers.json()
 
 
+def test_workers_endpoint_joins_live_service_and_durable_telemetry(dashboard, monkeypatch, tmp_path):
+    from importlib import import_module
+    from workflow.worker_telemetry import WorkerTelemetry
+
+    client, _, _ = dashboard
+    app_module = import_module("controlplane.app")
+    queue = app_module.settings().queue_db
+    telemetry = WorkerTelemetry(queue, tmp_path / "state", "wf-w1", "wellfound")
+    telemetry.claimed("job-a", queue_depth=2)
+    telemetry.outcome("job-a", "done", "provider-confirmed", queue_depth=1)
+    monkeypatch.setattr(app_module, "worker_status", lambda: [{
+        "unit": "jobhunt-wf@w1.service", "active_state": "active",
+        "sub_state": "running", "pid": 123, "restarts": 0,
+        "exit_status": 0, "cpu_percent": 0, "memory_bytes": 0,
+    }])
+
+    response = client.get("/api/workers")
+    assert response.status_code == 200
+    row = next(item for item in response.json() if item["worker_id"] == "wf-w1")
+    assert row["runtime_state"] == "idle"
+    assert row["adapter"] == "wellfound"
+    assert row["queue_depth"] == 1
+    assert row["last_success_at"]
+    assert row["recent_events"][0]["outcome_code"] == "done"
+    assert row["state_path"] == "state_queue/wellfound/wf-w1"
+
+
 def test_spa_exposes_history_issues_and_site_form():
     from pathlib import Path
 

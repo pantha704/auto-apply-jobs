@@ -47,7 +47,7 @@ def test_queue_migration_is_versioned_idempotent_and_preserves_legacy_rows(tmp_p
     path = tmp_path / "queue.db"
     legacy_queue(path)
 
-    assert migrate_queue(path) == [1]
+    assert migrate_queue(path) == [1, 2]
     assert migrate_queue(path) == []
 
     db = sqlite3.connect(path)
@@ -63,7 +63,7 @@ def test_queue_migration_is_versioned_idempotent_and_preserves_legacy_rows(tmp_p
     assert db.execute("SELECT status FROM applications").fetchall() == [("submitted",)]
     assert db.execute(
         "SELECT version FROM schema_migrations WHERE database_name='queue'"
-    ).fetchall() == [(1,)]
+    ).fetchall() == [(1,), (2,)]
     db.close()
 
 
@@ -83,6 +83,7 @@ def test_queue_migration_creates_operational_history_tables(tmp_path):
         "application_runs",
         "job_attempts",
         "worker_instances",
+        "worker_events",
         "artifacts",
         "preference_evaluations",
         "workflow_actions",
@@ -113,6 +114,9 @@ def test_queue_migration_creates_operational_history_tables(tmp_path):
         "retryable",
         "safe_detail",
     } <= {row[1] for row in db.execute("PRAGMA table_info(job_attempts)")}
+    assert {"current_job_id", "started_at", "last_event_at"} <= {
+        row[1] for row in db.execute("PRAGMA table_info(worker_instances)")
+    }
     db.close()
 
 
@@ -185,7 +189,7 @@ def test_control_migration_creates_onboarding_and_recipe_schema(tmp_path):
     path = tmp_path / "control.db"
     legacy_control(path)
 
-    assert migrate_control(path) == [1, 2, 3, 4]
+    assert migrate_control(path) == [1, 2, 3, 4, 5, 6]
     assert migrate_control(path) == []
 
     db = sqlite3.connect(path)
@@ -219,7 +223,15 @@ def test_control_migration_creates_onboarding_and_recipe_schema(tmp_path):
     ]
     assert db.execute(
         "SELECT version FROM schema_migrations WHERE database_name='control' ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,)]
+    send_columns = {
+        row[1] for row in db.execute("PRAGMA table_info(cold_email_sends)")
+    }
+    assert {"approved_at", "claimed_by", "lease_expires_at", "attempt_count", "sent_at"} <= send_columns
+    send_sql = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='cold_email_sends'"
+    ).fetchone()[0]
+    assert "unknown" in send_sql
     db.close()
 
 
@@ -257,3 +269,37 @@ def test_control_v2_adds_discovery_tables_idempotently(tmp_path):
     }
     assert "idx_watchlist_url" in indexes
     db.close()
+
+
+def test_control_v6_reconciles_legacy_duplicate_queued_sends(tmp_path):
+    from workflow.schema import migrate_control
+
+    control = tmp_path / "control.db"
+    migrate_control(control)
+    with sqlite3.connect(control) as db:
+        db.execute("DROP INDEX idx_cold_email_one_active")
+        db.execute(
+            "DELETE FROM schema_migrations WHERE database_name='control' AND version=6"
+        )
+        db.execute(
+            """INSERT INTO cold_contacts(
+                 id,company,email,email_norm,status,created_at,updated_at
+               ) VALUES('contact-dup','Acme','jobs@acme.test','jobs@acme.test',
+                        'drafted','2026-01-01','2026-01-01')"""
+        )
+        for send_id, created in (("send-old", "2026-01-01"), ("send-new", "2026-01-02")):
+            db.execute(
+                """INSERT INTO cold_email_sends(
+                     id,contact_id,status,created_at,updated_at
+                   ) VALUES(?, 'contact-dup', 'queued', ?, ?)""",
+                (send_id, created, created),
+            )
+    assert migrate_control(control) == [6]
+    with sqlite3.connect(control) as db:
+        rows = db.execute(
+            "SELECT id,status,error FROM cold_email_sends WHERE contact_id='contact-dup' ORDER BY id"
+        ).fetchall()
+        assert rows == [
+            ("send-new", "queued", None),
+            ("send-old", "cancelled", "superseded_by_migration"),
+        ]

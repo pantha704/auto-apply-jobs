@@ -6,6 +6,7 @@ import json, os, re, shutil, sqlite3, sys, time
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 import audit
 import dynamic_ui
+from workflow.worker_telemetry import telemetry_for
 import jd_match
 from title_filter import title_rejection_reason
 from worker_guard import BrowserWatchdog
@@ -17,6 +18,7 @@ CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
 STATE = os.path.join(HERE, "li_state.json")
 RESUME = "/home/ubuntu/Documents/Pratham_Jaiswal_Updated_Resume.pdf"
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "li-w1"
+STATE_ROOT = os.getenv("JOBHUNT_STATE_ROOT", os.path.join(HERE, "state_queue"))
 _worker_match = re.search(r"(\d+)$", WORKER_ID)
 CDP_PORT = int(os.environ.get("LI_CDP_PORT", str(9370 + (int(_worker_match.group(1)) if _worker_match else 1))))
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
@@ -40,26 +42,32 @@ ONE_TOPICS = ["python", "typescript", "react", "node", "javascript", "database",
 def db():
     return sqlite3.connect(DB)
 
+def telemetry():
+    return telemetry_for(WORKER_ID, "linkedin", DB, STATE_ROOT)
+
 def claim(portal):
     while True:
         c = db()
         row = c.execute("SELECT id, url, title FROM jobs WHERE portal=? AND status='pending' ORDER BY prio DESC, rowid LIMIT 1", (portal,)).fetchone()
         if not row:
-            c.close(); return None
+            c.close(); telemetry().idle(); return None
         reason = title_rejection_reason(row[2] or "", "linkedin")
         if reason:
             c.execute("UPDATE jobs SET status='skip', result=? WHERE id=? AND status='pending'", (reason, row[0]))
             c.commit(); c.close()
+            telemetry().outcome(row[0], "skip", reason)
             continue
         upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
         c.commit(); c.close()
         if upd.rowcount == 1:
+            telemetry().claimed(row[0])
             return {"id": row[0], "url": row[1], "title": row[2]}
 
 def mark(jid, status, result=""):
     c = db()
     c.execute("UPDATE jobs SET status=?, result=? WHERE id=?", (status, result[:200], jid))
     c.commit(); c.close()
+    telemetry().outcome(jid, status, result)
 
 def log(msg):
     print(f"[{WORKER_ID}] {msg}", flush=True)
@@ -333,9 +341,11 @@ def apply_job(url):
                             loc.first.fill(val)
                 except Exception:
                     pass
-            advance(page, "Next", "contact")
+            if not advance(page, "Next", "contact"):
+                return (False, "contact-next-unavailable")
             # resume page
-            advance(page, "Next", "resume1")
+            if not advance(page, "Next", "resume1"):
+                return (False, "resume-next-unavailable")
             resume_ok = False
             for sel_attempt in range(4):
                 page.evaluate("""() => {
@@ -357,13 +367,16 @@ def apply_job(url):
             if not resume_ok:
                 diag = page.evaluate("""() => [...document.querySelectorAll('button')].map(b=>((b.innerText||'').trim().slice(0,22)+':'+(b.disabled?1:0))).filter(x=>x.includes('Next')||x.includes('Review')).join(' | ') || 'no-next'""")
                 return (False, "resume-stuck|" + diag[:100])
-            click_any(page, ["^Next$", "^Review$"])
+            if not hybrid_modal_click(page, ["next", "review"]):
+                return (False, "resume-advance-unavailable")
             if "Resume*" in page.inner_text("body")[:400]:
-                click_any(page, ["^Next$", "^Review$"])
+                if not hybrid_modal_click(page, ["next", "review"]):
+                    return (False, "resume-repeat-advance-unavailable")
             # work-experience page: add entry if required
             try:
                 if page.get_by_role("button", name=re.compile("^Add work experience$", re.I)).count():
-                    page.get_by_role("button", name=re.compile("^Add work experience$", re.I)).click(timeout=4000)
+                    if not hybrid_modal_click(page, ["add_work_experience"]):
+                        return (False, "add-work-experience-unavailable")
                     page.wait_for_timeout(1500)
                     for q, v in [("Your title", "Full-Stack Developer"), ("Company", "Braid-Forbes Health Research")]:
                         js_text(page, q, v)
@@ -377,7 +390,8 @@ def apply_job(url):
                       return 'we-filled';
                     }""")
                     page.wait_for_timeout(800)
-                    click_any(page, ["^Save$"])
+                    if not hybrid_modal_click(page, ["save"]):
+                        return (False, "work-experience-save-unavailable")
                     page.wait_for_timeout(1500)
             except Exception:
                 pass
@@ -390,7 +404,7 @@ def apply_job(url):
                 if "Review" in page.inner_text("body"):
                     break
                 # find next/review button
-                if not click_any(page, ["^Review$", "^Next$"]):
+                if not hybrid_modal_click(page, ["review", "next"]):
                     return (False, "stuck-no-next")
                 page.wait_for_timeout(1800)
             # review → verify errors → submit
@@ -398,7 +412,7 @@ def apply_job(url):
             if errs:
                 # one more answer pass
                 answer_page(page)
-            if not click_any(page, ["^Submit application$"]):
+            if not click_terminal_submit(page):
                 try:
                     diag = page.inner_text("body")[:250].replace("\n", " | ")
                 except Exception:
@@ -424,10 +438,30 @@ def apply_job(url):
             except Exception: pass
 
 def advance(page, label, note):
-    click_any(page, [f"^{label}$"])
+    return hybrid_modal_click(page, [label.lower()])
 
-def click_any(page, labels):
-    for lab in labels:
+
+def _modal_signature(page):
+    try:
+        dialog = page.locator(".jobs-easy-apply-modal, [role=dialog]").first
+        return dialog.inner_text()[:1200] if dialog.count() else page.url
+    except Exception:
+        return page.url
+
+
+def hybrid_modal_click(page, intents):
+    for intent in intents:
+        before = _modal_signature(page)
+        if dynamic_ui.hybrid_click(
+            page, "linkedin", intent, CDP_URL,
+            postcondition=lambda before=before: _modal_signature(page) != before,
+        ):
+            return True
+    return False
+
+
+def click_terminal_submit(page):
+    for lab in ["^Submit application$"]:
         try:
             page.get_by_role("button", name=re.compile(lab, re.I)).first.click(timeout=3000)
             page.wait_for_timeout(1000)

@@ -106,8 +106,9 @@
       <div id="sources-content" class="panel loading-state">Loading external sources…</div>
     </section>
     <section id="page-cold-email" class="page data-page">
-      <div class="section-actions"><div><h2>Cold Email</h2><p>Prepare one company at a time, edit it, open Gmail, then record only what you actually sent.</p></div><span class="manual-tag">Manual send only</span></div>
+      <div class="section-actions"><div><h2>Cold Email</h2><p>Draft, explicitly approve, send through Gmail API, and retain transactional progress.</p></div><span class="live-tag"><i></i>APPROVAL REQUIRED</span></div>
       <div id="cold-email-metrics" class="metric-grid"></div>
+      <div id="cold-sender-status" class="panel loading-state">Loading sender status…</div>
       <div class="split">
         <form id="cold-contact-form" class="workflow-form">
           <div class="panel-head"><div><h2>Add company contact</h2><p>No mail is sent when you save a contact.</p></div></div>
@@ -138,6 +139,7 @@ Pratham Jaiswal</textarea></label>
       </div>
       <div id="cold-draft-editor" class="panel hidden" aria-live="polite"></div>
       <div id="cold-email-content" class="panel loading-state">Loading cold-email queue…</div>
+      <div id="cold-send-history" class="panel loading-state">Loading send history…</div>
     </section>
     <section id="page-reviews" class="page data-page"><div class="section-actions"><div><h2>Review tasks</h2><p>Human decisions requested by automation. Sensitive answer payloads are hidden.</p></div></div><div id="reviews-content" class="panel loading-state">Loading review queue…</div></section>
     <section id="page-runs" class="page data-page"><div class="section-actions"><div><h2>Runs / Traces</h2><p>Workflow execution history with inspectable, sanitized trace events.</p></div></div><div id="runs-content" class="panel loading-state">Loading runs…</div><div id="trace-content" class="panel hidden" aria-live="polite"></div></section>

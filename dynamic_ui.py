@@ -330,6 +330,8 @@ def remember(portal: str, intent: str, spec: dict, *, verified: bool = False) ->
 
 def hybrid_click(page, portal: str, intent: str, cdp_url: str, *, postcondition=None) -> bool:
     """Route a low-risk click through deterministic Playwright, then BU recovery."""
+    if intent in {"submit", "send", "finalize"}:
+        raise ValueError("terminal actions are deterministic-only")
     from workflow.adapters.base import DriverAction, RuntimeContext
     from workflow.browser_use_client import BrowserUseSidecar
     from workflow.leases import FileSessionLease
@@ -347,6 +349,21 @@ def hybrid_click(page, portal: str, intent: str, cdp_url: str, *, postcondition=
                         return (DriverAction("click", intent, candidate.candidate_id),)
             return ()
 
+    def verify_postcondition() -> bool:
+        if postcondition is None:
+            return True
+        for _ in range(25):
+            try:
+                if postcondition():
+                    return True
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(100)
+            except Exception:
+                time.sleep(0.1)
+        return False
+
     driver = PlaywrightPageDriver(page)
     router = RuntimeRouter(
         driver,
@@ -354,9 +371,12 @@ def hybrid_click(page, portal: str, intent: str, cdp_url: str, *, postcondition=
         Adapter(),
         BrowserUseSidecar(cdp_url),
         recovery_mode="execute",
-        recovery_verifier=lambda _context, _trace: bool(postcondition()) if postcondition else True,
+        recovery_verifier=lambda _context, _trace: verify_postcondition(),
     )
-    result = router.run(RuntimeContext(f"{portal}:{intent}", getattr(page, "url", "about:blank")))
+    result = router.run(
+        RuntimeContext(f"{portal}:{intent}", getattr(page, "url", "about:blank")),
+        recovery_intent=intent,
+    )
     return result.route.value in {"recipe", "deterministic", "recovery"}
 
 

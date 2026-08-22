@@ -1,0 +1,26 @@
+[Unit]
+Description=Job hunt approved cold-email sender %i
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/job_hunt_linkedin
+EnvironmentFile=-/etc/jobhunt/job-hunt.env
+Environment=PYTHONUNBUFFERED=1
+Environment=JOBHUNT_WORKER_STATE=/home/ubuntu/job_hunt_linkedin/state_queue
+Environment=JOBHUNT_GOOGLE_TOKEN=/home/ubuntu/.hermes/google_token.json
+Environment=JOBHUNT_GOOGLE_API_SCRIPT=/home/ubuntu/.hermes/skills/productivity/google-workspace/scripts/google_api.py
+ExecStart=/home/ubuntu/jobhunt-venv/bin/python /home/ubuntu/job_hunt_linkedin/worker_cold_email.py email-%i
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/job_hunt_linkedin -/home/ubuntu/.hermes/google_token.json
+
+[Install]
+WantedBy=multi-user.target

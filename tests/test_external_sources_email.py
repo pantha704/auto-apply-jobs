@@ -65,7 +65,7 @@ def test_external_source_and_manual_contact_flow_is_not_an_application(dashboard
     assert confirmed == 1
 
 
-def test_template_renders_editable_draft_and_gmail_compose_url(dashboard):
+def test_template_renders_editable_exact_draft_without_manual_send_url(dashboard):
     client, _, _ = dashboard
     source_id = client.post(
         "/api/external-sources",
@@ -95,8 +95,7 @@ def test_template_renders_editable_draft_and_gmail_compose_url(dashboard):
     body = draft.json()
     assert body["subject"] == "Application for Engineer at Acme"
     assert "Acme team" in body["body"]
-    assert body["gmail_compose_url"].startswith("https://mail.google.com/mail/")
-    assert "jobs%40acme.test" in body["gmail_compose_url"]
+    assert "gmail_compose_url" not in body
     assert client.get("/api/cold-email/contacts").json()["counts"]["drafted"] == 1
 
 
@@ -108,15 +107,19 @@ def test_operator_ui_exposes_sources_and_manual_gmail_lane(dashboard):
     assert 'data-page="cold-email"' in page.text
     assert 'id="source-form"' in page.text
     assert 'id="cold-contact-form"' in page.text
-    assert "Manual send only" in page.text
+    assert "APPROVAL REQUIRED" in page.text
+    assert "explicitly approve" in page.text
     script = client.get("/static/app.js").text
     assert "/api/external-sources" in script
     assert "/api/cold-email/contacts" in script
-    assert "gmail_compose_url" in script
+    assert "gmail_compose_url" not in script
+    assert "/mark-sent" not in script
+    assert "I sent this" not in script
+    assert "I already sent this" not in script
 
 
-def test_manual_mark_sent_requires_confirmation_and_has_no_send_route(dashboard):
-    client, _, queue = dashboard
+def test_manual_mark_sent_is_disabled_and_cannot_bypass_provider_confirmation(dashboard):
+    client, control, queue = dashboard
     source_id = client.post(
         "/api/external-sources",
         json={"name": "Manual", "url": "manual://send", "kind": "manual"},
@@ -125,17 +128,62 @@ def test_manual_mark_sent_requires_confirmation_and_has_no_send_route(dashboard)
         "/api/cold-email/contacts",
         json={"company": "Acme", "email": "jobs@acme.test", "source_id": source_id},
     ).json()["id"]
+    client.post(f"/api/cold-email/contacts/{contact_id}/draft", json={})
+    approved = client.post(
+        f"/api/cold-email/contacts/{contact_id}/approve-send",
+        json={"confirmed": True},
+    )
+    assert approved.status_code == 200
 
-    assert client.post(f"/api/cold-email/contacts/{contact_id}/mark-sent", json={"confirmed": False}).status_code == 409
-    assert client.post(f"/api/cold-email/contacts/{contact_id}/send", json={}).status_code == 404
     marked = client.post(
         f"/api/cold-email/contacts/{contact_id}/mark-sent",
         json={"confirmed": True, "provider_id": "gmail-manual"},
     )
-    assert marked.status_code == 200
-    assert marked.json()["status"] == "sent"
+    assert marked.status_code == 410
+    assert client.post(f"/api/cold-email/contacts/{contact_id}/send", json={}).status_code == 404
+    with sqlite3.connect(control) as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM cold_email_sends WHERE contact_id=? AND status='queued'",
+            (contact_id,),
+        ).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT COUNT(*) FROM cold_email_sends WHERE contact_id=? AND status='sent'",
+            (contact_id,),
+        ).fetchone()[0] == 0
 
     confirmed = sqlite3.connect(queue).execute(
         "SELECT COUNT(*) FROM applications WHERE status IN ('submitted','applied')"
     ).fetchone()[0]
     assert confirmed == 1
+
+
+def test_approved_draft_is_queued_for_sender_and_visible_in_progress(dashboard):
+    client, _, _ = dashboard
+    contact_id = client.post(
+        "/api/cold-email/contacts",
+        json={"company": "Acme", "email": "approved@acme.test", "role": "Engineer"},
+    ).json()["id"]
+    client.post(f"/api/cold-email/contacts/{contact_id}/draft", json={})
+    assert client.post(
+        f"/api/cold-email/contacts/{contact_id}/approve-send", json={"confirmed": False}
+    ).status_code == 409
+    approved = client.post(
+        f"/api/cold-email/contacts/{contact_id}/approve-send", json={"confirmed": True}
+    )
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "queued"
+    progress = client.get("/api/cold-email/progress").json()
+    assert progress["counts"]["queued"] == 1
+    assert progress["provider"]["kind"] == "gmail_api"
+    assert progress["source_of_truth"] == "sqlite"
+    assert progress["event_projection"] == "jsonl"
+
+
+def test_operator_ui_exposes_sender_queue_and_history(dashboard):
+    client, _, _ = dashboard
+    page = client.get("/").text
+    script = client.get("/static/app.js").text
+    assert 'id="cold-sender-status"' in page
+    assert 'id="cold-send-history"' in page
+    assert "/api/cold-email/progress" in script
+    assert "approve-send" in script

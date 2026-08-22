@@ -43,6 +43,7 @@ learned/agent_inbox/
 controlplane.db
 applications.db
 *.previous
+*.pre-*
 .controlplane.key
 *.db-wal
 *.db-shm

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 import psutil
 from cryptography.fernet import Fernet
@@ -53,6 +53,7 @@ WORKER_UNITS = {
     "jobhunt-wf@w2.service",
     "jobhunt-yc@w1.service",
     "jobhunt-ext@w1.service",
+    "jobhunt-email@w1.service",
     "jobhunt-review@r1.service",
 }
 
@@ -902,10 +903,89 @@ def worker_status() -> list[dict]:
     return workers
 
 
+def _worker_id_from_unit(unit: str) -> str:
+    instance = unit.split("@", 1)[1].removesuffix(".service") if "@" in unit else unit
+    prefix = unit.split("@", 1)[0].removeprefix("jobhunt-")
+    if prefix == "is":
+        return instance if instance.startswith("is-") else f"is-{instance}"
+    return {
+        "wf": f"wf-{instance}", "li": f"li-{instance}", "yc": f"yc-{instance}",
+        "ext": f"ext-{instance}", "email": f"email-{instance}",
+        "review": f"rev-{instance}",
+    }.get(prefix, instance)
+
+
+def _worker_telemetry() -> dict[str, dict]:
+    path = settings().queue_db
+    if not path.exists():
+        return {}
+    with connect(path, readonly=True) as db:
+        tables = {
+            row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if not {"worker_instances", "worker_events"} <= tables:
+            return {}
+        runtimes = {
+            row["id"]: dict(row)
+            for row in db.execute("SELECT * FROM worker_instances")
+        }
+        for worker_id, runtime in runtimes.items():
+            runtime["recent_events"] = [
+                dict(row) for row in db.execute(
+                    """SELECT event,job_id,outcome_code,safe_detail,created_at
+                       FROM worker_events WHERE worker_id=? ORDER BY id DESC LIMIT 8""",
+                    (worker_id,),
+                )
+            ]
+            runtime["state_path"] = str(
+                Path("state_queue") / str(runtime.get("adapter") or "unknown") / worker_id
+            )
+    return runtimes
+
+
 @app.get("/api/workers")
 @app.get("/api/workflow/workers")
 def workers() -> list[dict]:
-    return worker_status()
+    live = worker_status()
+    telemetry = _worker_telemetry()
+    seen: set[str] = set()
+    for worker in live:
+        worker_id = _worker_id_from_unit(worker.get("unit") or "")
+        worker["worker_id"] = worker_id
+        runtime = telemetry.get(worker_id)
+        if runtime:
+            seen.add(worker_id)
+            worker.update({
+                "runtime_state": runtime.get("state"),
+                "adapter": runtime.get("adapter"),
+                "current_job_id": runtime.get("current_job_id"),
+                "heartbeat_at": runtime.get("heartbeat_at"),
+                "last_success_at": runtime.get("last_success_at"),
+                "queue_depth": runtime.get("queue_depth"),
+                "safe_detail": runtime.get("safe_detail"),
+                "state_path": runtime.get("state_path"),
+                "recent_events": runtime.get("recent_events", []),
+            })
+    for worker_id, runtime in telemetry.items():
+        if worker_id in seen:
+            continue
+        live.append({
+            "unit": runtime.get("unit"), "worker_id": worker_id,
+            "active_state": "unregistered", "sub_state": "telemetry-only",
+            "pid": 0, "restarts": 0, "exit_status": 0,
+            "cpu_percent": 0, "memory_bytes": 0,
+            "runtime_state": runtime.get("state"), "adapter": runtime.get("adapter"),
+            "current_job_id": runtime.get("current_job_id"),
+            "heartbeat_at": runtime.get("heartbeat_at"),
+            "last_success_at": runtime.get("last_success_at"),
+            "queue_depth": runtime.get("queue_depth"),
+            "safe_detail": runtime.get("safe_detail"),
+            "state_path": runtime.get("state_path"),
+            "recent_events": runtime.get("recent_events", []),
+        })
+    return live
 
 
 @app.get("/api/workers/{unit}/history")
@@ -1025,9 +1105,8 @@ class ColdDraftInput(BaseModel):
     body: str | None = Field(default=None, max_length=10000)
 
 
-class ColdMarkSentInput(BaseModel):
+class ColdApproveSendInput(BaseModel):
     confirmed: bool = False
-    provider_id: str = Field(default="gmail-manual", max_length=80)
 
 
 def _valid_contact_email(value: str) -> bool:
@@ -1106,7 +1185,7 @@ def cold_email_contacts(status_filter: str | None = Query(None, alias="status"))
     return {
         "items": [dict(row) for row in rows],
         "counts": {row["status"]: row["count"] for row in counts},
-        "manual_send_only": True,
+        "automatic_send_requires_approval": True,
     }
 
 
@@ -1188,34 +1267,69 @@ def draft_cold_email(contact_id: str, item: ColdDraftInput) -> dict:
                       draft_body=?,drafted_at=?,updated_at=? WHERE id=?""",
             (template_id, subject, body, ts, ts, contact_id),
         )
-    compose = "https://mail.google.com/mail/?" + urlencode(
-        {"view": "cm", "fs": "1", "to": contact["email"], "su": subject, "body": body}
-    )
     return {"id": contact_id, "status": "drafted", "subject": subject,
-            "body": body, "gmail_compose_url": compose}
+            "body": body}
 
 
 @app.post("/api/cold-email/contacts/{contact_id}/mark-sent")
-def mark_cold_email_sent(contact_id: str, item: ColdMarkSentInput) -> dict:
+def mark_cold_email_sent(contact_id: str) -> dict:
+    raise HTTPException(
+        status.HTTP_410_GONE,
+        "manual send recording retired; approve the exact draft for Gmail API delivery",
+    )
+
+
+@app.post("/api/cold-email/contacts/{contact_id}/approve-send")
+def approve_cold_email_send(contact_id: str, item: ColdApproveSendInput) -> dict:
     if not item.confirmed:
-        raise HTTPException(409, "manual send confirmation required")
-    send_id, ts = str(uuid.uuid4()), now()
-    with connect(settings().control_db) as db:
-        contact = db.execute("SELECT * FROM cold_contacts WHERE id=?", (contact_id,)).fetchone()
-        if not contact:
-            raise HTTPException(404, "contact not found")
-        db.execute(
-            """INSERT INTO cold_email_sends(
-                 id,contact_id,template_id,subject,status,provider_id,created_at
-               ) VALUES(?,?,?,?, 'sent',?,?)""",
-            (send_id, contact_id, contact["template_id"], contact["draft_subject"],
-             item.provider_id, ts),
+        raise HTTPException(409, "explicit send approval required")
+    from workflow.cold_email import ColdEmailQueue
+    try:
+        send_id = ColdEmailQueue(settings().control_db).approve(
+            contact_id, approved_by="dashboard-operator"
         )
-        db.execute(
-            "UPDATE cold_contacts SET status='sent',last_sent_at=?,updated_at=? WHERE id=?",
-            (ts, ts, contact_id),
-        )
-    return {"id": contact_id, "send_id": send_id, "status": "sent"}
+    except KeyError as exc:
+        raise HTTPException(404, "contact not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"id": contact_id, "send_id": send_id, "status": "queued"}
+
+
+@app.get("/api/cold-email/progress")
+def cold_email_progress() -> dict:
+    token_path = Path(os.environ.get(
+        "JOBHUNT_GOOGLE_TOKEN", "/home/ubuntu/.hermes/google_token.json"
+    ))
+    with connect(settings().control_db, readonly=True) as db:
+        counts = {
+            row["status"]: row["count"]
+            for row in db.execute(
+                "SELECT status,COUNT(*) count FROM cold_email_sends GROUP BY status"
+            ).fetchall()
+        }
+        history = [dict(row) for row in db.execute(
+            """SELECT s.id,s.contact_id,c.company,c.email,s.subject,s.status,
+                      s.provider_id,s.error,s.attempt_count,s.created_at,s.sent_at,s.updated_at
+               FROM cold_email_sends s JOIN cold_contacts c ON c.id=s.contact_id
+               ORDER BY COALESCE(s.updated_at,s.created_at) DESC LIMIT 100"""
+        ).fetchall()]
+    status_path = Path(os.environ.get(
+        "JOBHUNT_WORKER_STATE", ROOT / "state_queue"
+    )) / "cold-email" / "email-w1" / "status.json"
+    worker = {"worker_id": "email-w1", "status": "not_started", "updated_at": None}
+    try:
+        worker.update(json.loads(status_path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        pass
+    return {
+        "counts": counts,
+        "items": history,
+        "provider": {"kind": "gmail_api", "authenticated": token_path.is_file()},
+        "source_of_truth": "sqlite",
+        "event_projection": "jsonl",
+        "event_root": "state_queue/cold-email",
+        "worker": worker,
+    }
 
 
 @app.post("/api/ingest/batch")

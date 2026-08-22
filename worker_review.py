@@ -26,9 +26,16 @@ import worker_wellfound as ww
 import worker_yc as wy
 import worker_external as wex
 from worker_guard import BrowserWatchdog
+from workflow.worker_telemetry import telemetry_for
 
 AMBIGUOUS = ("submit-unconfirmed", "no-apply-modal", "send-unconfirmed",
              "no-send-button", "fill-err", "unhandled-source")
+QUEUE_DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
+STATE_ROOT = os.getenv("JOBHUNT_STATE_ROOT", os.path.join(HERE, "state_queue"))
+
+
+def telemetry():
+    return telemetry_for(WORKER_ID, "review", QUEUE_DB, STATE_ROOT)
 
 
 def log(msg):
@@ -36,7 +43,7 @@ def log(msg):
 
 
 def db():
-    return sqlite3.connect(os.path.join(HERE, "apply_queue.db"))
+    return sqlite3.connect(QUEUE_DB)
 
 
 def claim_ambiguous():
@@ -50,6 +57,7 @@ def claim_ambiguous():
         [f"{a}%" for a in AMBIGUOUS]).fetchone()
     if not row:
         c.close()
+        telemetry().idle(safe_detail="no-ambiguous-jobs")
         return None
     upd = c.execute(
         f"UPDATE jobs SET status='claimed', claimed_by=?, result='reviewing' "
@@ -59,6 +67,7 @@ def claim_ambiguous():
     c.close()
     if upd.rowcount != 1:
         return claim_ambiguous()
+    telemetry().claimed(row[0])
     return {"id": row[0], "url": row[1], "title": row[2], "portal": row[3], "prev": row[4]}
 
 
@@ -67,6 +76,7 @@ def mark(jid, status, result):
     c.execute("UPDATE jobs SET status=?, result=? WHERE id=?", (status, result[:250], jid))
     c.commit()
     c.close()
+    telemetry().outcome(jid, status, result)
 
 
 def review(job):

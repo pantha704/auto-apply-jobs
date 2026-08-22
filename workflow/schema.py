@@ -4,8 +4,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-QUEUE_VERSION = 1
-CONTROL_VERSION = 4
+QUEUE_VERSION = 2
+CONTROL_VERSION = 6
 
 
 def _now() -> str:
@@ -44,7 +44,7 @@ def migrate_queue(path: str | Path) -> list[int]:
                 "SELECT version FROM schema_migrations WHERE database_name='queue'"
             )
         }
-        if QUEUE_VERSION not in seen:
+        if 1 not in seen:
             columns = _columns(db, "jobs")
             additions = {
                 "claimed_at": "TEXT",
@@ -202,9 +202,43 @@ def migrate_queue(path: str | Path) -> list[int]:
             )
             db.execute(
                 "INSERT INTO schema_migrations(database_name,version,applied_at) VALUES('queue',?,?)",
-                (QUEUE_VERSION, _now()),
+                (1, _now()),
             )
-            applied.append(QUEUE_VERSION)
+            applied.append(1)
+        if 2 not in seen:
+            worker_columns = _columns(db, "worker_instances")
+            worker_additions = {
+                "current_job_id": "TEXT",
+                "started_at": "TEXT",
+                "last_event_at": "TEXT",
+            }
+            for name, declaration in worker_additions.items():
+                if name not in worker_columns:
+                    db.execute(f"ALTER TABLE worker_instances ADD COLUMN {name} {declaration}")
+            _execute_script(
+                db,
+                """
+                CREATE TABLE worker_events (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  worker_id TEXT NOT NULL,
+                  adapter TEXT NOT NULL,
+                  event TEXT NOT NULL,
+                  job_id TEXT,
+                  outcome_code TEXT,
+                  safe_detail TEXT,
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX idx_worker_events_worker_time
+                  ON worker_events(worker_id, created_at DESC);
+                CREATE INDEX idx_worker_events_adapter_time
+                  ON worker_events(adapter, created_at DESC);
+                """,
+            )
+            db.execute(
+                "INSERT INTO schema_migrations(database_name,version,applied_at) VALUES('queue',?,?)",
+                (2, _now()),
+            )
+            applied.append(2)
         db.commit()
         return applied
     except Exception:
@@ -640,6 +674,97 @@ def migrate_control(path: str | Path) -> list[int]:
                 (4, _now()),
             )
             applied.append(4)
+        if 5 not in seen:
+            columns = _columns(db, "cold_email_sends")
+            additions = {
+                "body": "TEXT",
+                "approved_at": "TEXT",
+                "approved_by": "TEXT",
+                "claimed_by": "TEXT",
+                "claimed_at": "TEXT",
+                "lease_expires_at": "TEXT",
+                "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "next_attempt_at": "TEXT",
+                "sent_at": "TEXT",
+                "updated_at": "TEXT",
+            }
+            for name, declaration in additions.items():
+                if name not in columns:
+                    db.execute(f"ALTER TABLE cold_email_sends ADD COLUMN {name} {declaration}")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cold_email_send_queue ON cold_email_sends(status,next_attempt_at,created_at)"
+            )
+            db.execute(
+                "INSERT INTO schema_migrations(database_name,version,applied_at) VALUES('control',?,?)",
+                (5, _now()),
+            )
+            applied.append(5)
+        if 6 not in seen:
+            db.execute(
+                """CREATE TABLE cold_email_sends_v6 (
+                  id TEXT PRIMARY KEY,
+                  contact_id TEXT NOT NULL REFERENCES cold_contacts(id),
+                  template_id TEXT,
+                  subject TEXT,
+                  status TEXT NOT NULL CHECK(status IN (
+                    'queued','sending','sent','failed','cancelled','unknown'
+                  )),
+                  provider_id TEXT,
+                  error TEXT,
+                  created_at TEXT NOT NULL,
+                  body TEXT,
+                  approved_at TEXT,
+                  approved_by TEXT,
+                  claimed_by TEXT,
+                  claimed_at TEXT,
+                  lease_expires_at TEXT,
+                  attempt_count INTEGER NOT NULL DEFAULT 0,
+                  next_attempt_at TEXT,
+                  sent_at TEXT,
+                  updated_at TEXT
+                )"""
+            )
+            db.execute(
+                """INSERT INTO cold_email_sends_v6(
+                  id,contact_id,template_id,subject,status,provider_id,error,created_at,
+                  body,approved_at,approved_by,claimed_by,claimed_at,lease_expires_at,
+                  attempt_count,next_attempt_at,sent_at,updated_at
+                ) SELECT id,contact_id,template_id,subject,status,provider_id,error,created_at,
+                  body,approved_at,approved_by,claimed_by,claimed_at,lease_expires_at,
+                  attempt_count,next_attempt_at,sent_at,updated_at FROM cold_email_sends"""
+            )
+            db.execute("DROP TABLE cold_email_sends")
+            db.execute("ALTER TABLE cold_email_sends_v6 RENAME TO cold_email_sends")
+            db.execute(
+                """WITH ranked AS (
+                     SELECT id,ROW_NUMBER() OVER (
+                       PARTITION BY contact_id
+                       ORDER BY CASE status
+                         WHEN 'unknown' THEN 0 WHEN 'sending' THEN 1 ELSE 2 END,
+                         COALESCE(updated_at,created_at) DESC,id DESC
+                     ) position
+                     FROM cold_email_sends
+                     WHERE status IN ('queued','sending','unknown')
+                   )
+                   UPDATE cold_email_sends
+                   SET status='cancelled',error='superseded_by_migration',
+                       claimed_by=NULL,claimed_at=NULL,lease_expires_at=NULL,
+                       updated_at=COALESCE(updated_at,created_at)
+                   WHERE id IN (SELECT id FROM ranked WHERE position > 1)"""
+            )
+            db.execute(
+                "CREATE INDEX idx_cold_email_send_queue ON cold_email_sends(status,next_attempt_at,created_at)"
+            )
+            db.execute(
+                """CREATE UNIQUE INDEX idx_cold_email_one_active
+                   ON cold_email_sends(contact_id)
+                   WHERE status IN ('queued','sending','unknown')"""
+            )
+            db.execute(
+                "INSERT INTO schema_migrations(database_name,version,applied_at) VALUES('control',?,?)",
+                (6, _now()),
+            )
+            applied.append(6)
         db.commit()
         return applied
     except Exception:
