@@ -1,0 +1,22 @@
+[Unit]
+Description=Manual LinkedIn canonical session renewal owner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/job_hunt_linkedin
+EnvironmentFile=/etc/jobhunt/job-hunt.env
+Environment=PYTHONUNBUFFERED=1
+Environment=JOBHUNT_CONTROL_DB=/var/lib/jobhunt/controlplane.db
+Environment=JOBHUNT_SESSION_STORAGE=/home/ubuntu/job_hunt_linkedin/.private/sessions
+Environment=JOBHUNT_VAULT_KEY=/etc/jobhunt/controlplane.key
+ExecStart=/home/ubuntu/jobhunt-venv/bin/python /home/ubuntu/job_hunt_linkedin/li_relogin.py
+TimeoutStartSec=15min
+Restart=no
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/job_hunt_linkedin /var/lib/jobhunt

@@ -50,6 +50,7 @@ def workflow_api(tmp_path, monkeypatch):
     monkeypatch.setenv("JOBHUNT_CONTROL_DB", str(control))
     monkeypatch.setenv("JOBHUNT_VAULT_KEY", str(tmp_path / "vault.key"))
     monkeypatch.setenv("JOBHUNT_RESUME_STORAGE", str(tmp_path / "private-resumes"))
+    monkeypatch.setenv("JOBHUNT_SESSION_STORAGE", str(tmp_path / "private-sessions"))
     monkeypatch.setenv("JOBHUNT_DASHBOARD_AUTH_DISABLED", "1")
     monkeypatch.setenv("JOBHUNT_PROFILE_BOOTSTRAP", "0")
     monkeypatch.setenv("JOBHUNT_SITE_BOOTSTRAP", "0")
@@ -135,6 +136,42 @@ def test_preferences_answers_tasks_and_trace_are_safe(workflow_api):
     assert "Private role" not in str(runs) and "lease-secret" not in str(runs)
     trace = client.get("/api/workflow/runs/r1").json()
     assert trace["attempts"][0]["actions"][0]["input_ref"] == "candidate.email"
+
+
+def test_session_api_is_live_metadata_only_and_drives_site_readiness(workflow_api):
+    client, _, control, _ = workflow_api
+    import controlplane.app as module
+
+    with sqlite3.connect(control) as db:
+        db.execute(
+            """INSERT INTO sites(name,base_url,hostname,adapter,auth_type,session_ref,enabled,created_at,updated_at)
+               VALUES('LinkedIn','https://www.linkedin.com/jobs','www.linkedin.com','linkedin','session','legacy-path',1,'now','now')"""
+        )
+    before = client.get("/api/workflow/sites").json()[0]
+    assert before["credential_configured"] is False
+    assert before["session_state"] == "unknown"
+
+    service = module._session_manager()
+    lease = service.acquire_renewal("linkedin", "test", ttl_seconds=30)
+    candidate = service.stage_candidate(
+        "linkedin",
+        {"cookies": [{"name": "session", "value": "private-value", "domain": ".linkedin.com"}], "origins": []},
+        lease.token,
+    )
+    service.record_probe("linkedin", candidate.id, "valid", lease.token)
+    service.promote("linkedin", candidate.id, lease.token)
+    service.release_renewal("linkedin", lease.token)
+
+    response = client.get("/api/workflow/sessions")
+    assert response.status_code == 200
+    text = response.text
+    assert "private-value" not in text
+    assert "bundle_path" not in text and "digest" not in text and "lease_token" not in text
+    session = response.json()["sessions"][0]
+    assert session["portal"] == "linkedin" and session["state"] == "valid"
+    after = client.get("/api/workflow/sites").json()[0]
+    assert after["credential_configured"] is True
+    assert after["session_revision"] == 1
 
 
 def test_unmigrated_databases_report_capabilities_without_mutating(tmp_path, monkeypatch):

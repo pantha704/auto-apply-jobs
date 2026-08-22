@@ -22,6 +22,8 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone, timedelta
+from workflow.portal_session_runtime import session_manager
+from workflow.session_health import watchdog_session_guidance
 
 HERE = "/home/ubuntu/job_hunt_linkedin"
 DB = os.path.join(HERE, "apply_queue.db")
@@ -244,14 +246,18 @@ try:
 except Exception as e:
     ALERTS.append(f"err flood check err: {e}")
 
-# ---- 5. LinkedIn session health ----
+# ---- 5. Canonical LinkedIn session health (metadata only) ----
 try:
-    li = json.load(open(os.path.join(HERE, "li_state.json")))
-    has_li_at = any(c.get("name") == "li_at" for c in li.get("cookies", []))
-    if not has_li_at and li_pending > 1000:
-        alert("li_at", "LINKEDIN SESSION MISSING li_at — li workers cannot apply (relogin needed; retry scheduled)")
-except Exception as e:
-    ALERTS.append(f"li_state err: {e}")
+    li_status = session_manager().public_status("linkedin")
+    guidance = watchdog_session_guidance(
+        li_status.get("state", "unknown"),
+        li_status.get("safe_detail"),
+        li_pending,
+    )
+    if guidance:
+        alert("linkedin_session", guidance)
+except Exception:
+    ALERTS.append("linkedin canonical session health unavailable")
 
 # ---- 6. scraper cron/content health ----
 try:

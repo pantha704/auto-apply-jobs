@@ -28,7 +28,8 @@ class ProfileService:
         if "static" in self.storage_dir.resolve().parts:
             raise ValueError("resume storage must be outside static directories")
         self.storage_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.storage_dir, 0o700)
+        if (self.storage_dir.stat().st_mode & 0o777) != 0o700:
+            os.chmod(self.storage_dir, 0o700)
         self.fernet = fernet if isinstance(fernet, Fernet) else Fernet(fernet.encode() if isinstance(fernet, str) else fernet)
         self.max_size_bytes = max_size_bytes
         self.max_pages = max_pages

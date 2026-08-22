@@ -33,6 +33,18 @@ def _docx(text: str) -> bytes:
     return out.getvalue()
 
 
+def test_profile_service_does_not_mutate_already_secure_storage_permissions(tmp_path, monkeypatch):
+    from workflow.profile_service import ProfileService
+
+    _service(tmp_path)
+
+    def reject_chmod(*args, **kwargs):
+        raise AssertionError("secure existing storage must not be chmodded")
+
+    monkeypatch.setattr("workflow.profile_service.os.chmod", reject_chmod)
+    ProfileService(tmp_path / "control.db", tmp_path / "private", Fernet(Fernet.generate_key()))
+
+
 def test_profile_revisions_are_encrypted_immutable_and_only_one_is_approved(tmp_path):
     service = _service(tmp_path)
     first = service.create_profile({"identity.full_name": "Ada Lovelace", "contact.email": "ada@example.test"})

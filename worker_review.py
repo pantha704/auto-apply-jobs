@@ -27,6 +27,11 @@ import worker_yc as wy
 import worker_external as wex
 from worker_guard import BrowserWatchdog
 from workflow.worker_telemetry import telemetry_for
+from workflow.application_gate import (
+    PublicationUnavailable,
+    eligible_for_claim,
+    published_runtime,
+)
 
 AMBIGUOUS = ("submit-unconfirmed", "no-apply-modal", "send-unconfirmed",
              "no-send-button", "fill-err", "unhandled-source")
@@ -47,7 +52,7 @@ def db():
 
 
 def claim_ambiguous():
-    """Claim one ambiguous job across portals (skip-bucket, oldest first)."""
+    """Gate, pin, and claim one ambiguous job across portals."""
     c = db()
     like = " OR ".join(["result LIKE ?"] * len(AMBIGUOUS))
     row = c.execute(
@@ -59,16 +64,39 @@ def claim_ambiguous():
         c.close()
         telemetry().idle(safe_detail="no-ambiguous-jobs")
         return None
+    portal, url = row[3], row[1] or ""
+    if portal == "wellfound":
+        runtime = published_runtime("wellfound", ww.REQUIRED_FACTS)
+        ww.configure_publication(runtime)
+    elif portal == "yc":
+        runtime = published_runtime("yc", wy.REQUIRED_FACTS)
+        wy.configure_publication(runtime)
+    elif portal == "external":
+        needs_session = "himalayas" in url
+        runtime = published_runtime("himalayas" if needs_session else None, wex.REQUIRED_FACTS, require_session=needs_session)
+        wex.configure_publication(runtime)
+    else:
+        c.close()
+        raise PublicationUnavailable("review portal has no published runtime")
+    if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": portal}):
+        c.execute("UPDATE jobs SET result='reviewed|policy-ineligible' WHERE id=? AND status='skip'", (row[0],))
+        c.commit(); c.close()
+        telemetry().outcome(row[0], "skip", "policy-ineligible")
+        return claim_ambiguous()
     upd = c.execute(
-        f"UPDATE jobs SET status='claimed', claimed_by=?, result='reviewing' "
-        f"WHERE id=? AND status='skip' AND ({like}) AND result NOT LIKE 'reviewed%'",
-        [WORKER_ID, row[0]] + [f"{a}%" for a in AMBIGUOUS])
-    c.commit()
-    c.close()
+        f"""UPDATE jobs SET status='claimed',claimed_by=?,result='reviewing',
+            candidate_profile_id=?,candidate_profile_revision=?,resume_version_id=?,
+            preference_set_id=?,preference_set_version=?,portal_session_revision=?
+            WHERE id=? AND status='skip' AND ({like}) AND result NOT LIKE 'reviewed%'""",
+        [WORKER_ID, runtime.profile_id, runtime.profile_revision, runtime.resume_id,
+         runtime.preference_set.id, runtime.preference_set.version, runtime.session_revision,
+         row[0]] + [f"{a}%" for a in AMBIGUOUS])
+    c.commit(); c.close()
     if upd.rowcount != 1:
         return claim_ambiguous()
     telemetry().claimed(row[0])
-    return {"id": row[0], "url": row[1], "title": row[2], "portal": row[3], "prev": row[4]}
+    return {"id": row[0], "url": row[1], "title": row[2], "portal": row[3],
+            "prev": row[4], "runtime": runtime}
 
 
 def mark(jid, status, result):
@@ -87,7 +115,7 @@ def review(job):
         attempts += 1
         try:
             if portal == "wellfound":
-                ok, reason = ww.apply_one(url)
+                ok, reason = ww.apply_one(url, expected_session_revision=job["runtime"].session_revision)
                 if ok:
                     return mark(job["id"], "done", f"reviewed|{reason}")
                 # failed again — only retry on retryable-looking reasons
@@ -108,7 +136,7 @@ def review(job):
                 src = "weworkremotely" if "weworkremotely" in url else \
                       "himalayas" if "himalayas" in url else "yc" if "workatastartup" in url else \
                       "naukri" if "naukri" in url else "unknown"
-                ok, reason = wex.route({"url": url, "source": src})
+                ok, reason = wex.route({"url": url, "source": src}, job["runtime"].session_revision or None)
                 if ok:
                     return mark(job["id"], "done", f"reviewed|{reason}")
                 return mark(job["id"], "skip", f"reviewed|{reason}")
@@ -125,7 +153,7 @@ def audit_record(job, url, note):
     import audit
     audit.record_application("yc", job["title"], job["title"], url,
                              "submitted", answers={"note": (note or "")[:400]},
-                             resume_used="/home/ubuntu/Documents/Pratham_Jaiswal_Updated_Resume.pdf",
+                             resume_used=job["runtime"].resume_path,
                              note="reviewed")
 
 
@@ -135,7 +163,12 @@ def main():
     signal.signal(signal.SIGALRM, _alarm)
     log("reviewer started")
     while True:
-        job = claim_ambiguous()
+        try:
+            job = claim_ambiguous()
+        except PublicationUnavailable:
+            log("published profile/policy/session not ready — waiting before claim")
+            time.sleep(300)
+            continue
         if not job:
             log("no ambiguous jobs — sleeping 5m")
             time.sleep(300)

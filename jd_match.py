@@ -73,30 +73,37 @@ def minimum_required_experience(text):
 # canonical display names (dedup node/node.js, postgres/postgresql, next.js/nextjs)
 CANON = {"node": "node.js", "nextjs": "next.js", "postgres": "postgresql"}
 
-def extract_skills(text):
-    """Return {canonical_skill: info} for skills present in the JD text."""
+def extract_skills(text, approved_skills=None):
+    """Return JD skills intersected with an explicitly approved skill set."""
     t = text.lower()
+    approved = str(approved_skills or "").lower()
     found = {}
     for k, v in STACK.items():
+        if approved_skills is not None and k not in approved and CANON.get(k, k) not in approved:
+            continue
         pat = re.compile(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])")
         if pat.search(t):
             found[CANON.get(k, k)] = v
     return found
 
-def analyze(jd_text):
-    """Return dict: decision, reason, matched, gaps, note, senior."""
+def analyze(jd_text, approved_skills=None, approved_years=None, blockers=True):
+    """Analyze a JD; production callers pass immutable approved profile facts."""
     t = jd_text or ""
     tl = t.lower()
     # blockers first
     for pat, why in BLOCKERS:
-        if re.search(pat, tl):
+        if blockers and re.search(pat, tl):
             return {"decision": "skip", "reason": why, "matched": [], "gaps": [], "note": "", "senior": False}
     minimum_years = minimum_required_experience(t)
-    if minimum_years is not None and minimum_years >= 3:
+    experience_blocked = (
+        minimum_years is not None
+        and (minimum_years >= 3 if approved_years is None else minimum_years > float(approved_years))
+    )
+    if experience_blocked:
         return {"decision": "skip", "reason": "experience-required",
                 "matched": [], "gaps": [], "note": "", "senior": True,
                 "minimum_years": minimum_years}
-    found = extract_skills(t)
+    found = extract_skills(t, approved_skills)
     matched = sorted(set(found))
     gaps = sorted({s for s in ("go", "java", "aws", "kubernetes", "graphql", "terraform")
                    if re.search(r"(?<![a-z0-9])" + s + r"(?![a-z0-9])", tl)})

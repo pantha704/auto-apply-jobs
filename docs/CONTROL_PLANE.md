@@ -21,6 +21,7 @@ The control plane turns the existing job-application farm into an operator-facin
 | Sites | Add website URL, auth method, encrypted credential/session reference, ATS adapter |
 | Onboarding | Encrypted required profile fields, résumé and site readiness checklist |
 | Workers | Live systemd state, PID, CPU, RSS memory, restart count, restart control |
+| Portal Sessions | Privacy-safe canonical health, current revision, probe time, renewal state, and action guidance |
 | Issues | Blocking onboarding failures and grouped operational skip patterns |
 | History | Paginated, redacted application audit history |
 
@@ -34,7 +35,8 @@ JOBHUNT_DASHBOARD_PASSWORD=<strong-random-password>
 JOBHUNT_QUEUE_DB=/var/lib/jobhunt/apply_queue.db
 JOBHUNT_CONTROL_DB=/var/lib/jobhunt/controlplane.db
 JOBHUNT_VAULT_KEY=/etc/jobhunt/controlplane.key
-JOBHUNT_RESUME=/home/ubuntu/job_hunt_linkedin/resume.pdf
+JOBHUNT_RESUME_STORAGE=/home/ubuntu/job_hunt_linkedin/.private/resumes
+JOBHUNT_SESSION_STORAGE=/home/ubuntu/job_hunt_linkedin/.private/sessions
 ```
 
 `JOBHUNT_DASHBOARD_AUTH_DISABLED=1` is for local automated tests only. Never use it on a network listener.
@@ -94,6 +96,9 @@ Production keeps the authoritative queue under `/var/lib/jobhunt`. Legacy worker
 | GET | `/api/profile/status` | Completeness only; never profile values |
 | GET | `/api/readiness` | Typed blocking issues and remediation |
 | GET | `/api/workers` | Live systemd/process metrics |
+| GET | `/api/workflow/readiness` | Published Profile/Résumé/Policy readiness and operator tasks |
+| GET | `/api/workflow/sessions` | Privacy-safe canonical portal session metadata only |
+| GET | `/api/workflow/sessions/{portal}` | One portal's privacy-safe canonical metadata |
 | GET | `/api/workers/{unit}/history` | Retained uptime/resource samples |
 | POST | `/api/workers/{unit}/{action}` | Exact allowlist; `start`, `stop`, `restart` |
 | GET | `/api/issues` | Setup blockers and operational skip groups |
@@ -105,21 +110,24 @@ Production keeps the authoritative queue under `/var/lib/jobhunt`. Legacy worker
 - Site usernames and passwords are encrypted before SQLite insertion.
 - API responses include only `credential_configured` and a masked username.
 - Required profile fields are encrypted individually. Status responses expose field names and completeness, not values.
-- On first production startup, the control plane explicitly loads the repository's `profile.py`, which resolves the gitignored `profile_local.py`; set `JOBHUNT_PROFILE_BOOTSTRAP=0` to disable this or `JOBHUNT_PROFILE_MODULE` to choose another loader.
-- Session references point to local persistent profiles; session/cookie contents are not copied into the control DB.
+- Draft profile and résumé data are encrypted. Extracted résumé facts remain candidates until explicitly approved.
+- Workers consume only immutable approved Profile/Résumé releases and an active non-empty Policy release. Claims atomically pin those exact revisions.
+- Raw browser state is never stored in ordinary SQLite text columns. Immutable encrypted bundles live under `JOBHUNT_SESSION_STORAGE`; APIs expose only metadata.
+- A dedicated renewal owner must hold a portal-scoped lease and fencing token before staging, probing, promoting, or rolling back a session.
 
 ## Readiness model
 
 A configured site is blocked when any of these are true:
 
-- required applicant fields are missing;
-- résumé path is missing;
-- an adapter cannot be resolved;
-- no site is enabled;
-- password authentication lacks either username or password;
-- session authentication lacks an existing local session/profile path.
+- no complete approved Profile release exists;
+- no approved Résumé release exists;
+- no active, non-empty Policy release exists;
+- a required approved answer/fact is absent or mistyped;
+- an adapter cannot be resolved or no site is enabled;
+- the portal requires a session and its canonical state is not `valid`;
+- the queued job cannot be deterministically evaluated as eligible.
 
-Later generic-engine phases will add session probes, answer-bank coverage, network reachability, and adapter capability checks.
+`valid`, `expired`, `challenged`, and `unknown` remain distinct. File/cookie existence never establishes readiness; bounded authenticated endpoint probes are authoritative.
 
 ## Telemetry and retention
 

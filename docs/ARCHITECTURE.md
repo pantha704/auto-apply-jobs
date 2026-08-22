@@ -110,10 +110,9 @@ status, note, snap_before, snap_after, url_hash UNIQUE
 
 Screenshots land under `audits/` (gitignored).
 
-### 2.3 Identity
+### 2.3 Published applicant state
 
-`profile.py` loads gitignored `profile_local.py`, else `JOBHUNT_*` env.
-`audit.PROFILE` + each worker’s `PROFILE` / `PROFILE_DATA` read from there.
+Draft profile and résumé data are encrypted in the private control database. Résumé extraction creates candidate facts only. Workers consume only immutable approved profile and résumé releases plus an active, non-empty policy release. Every claim atomically pins the exact profile, résumé, policy, and required portal-session revisions; production workers never import `profile.py`, `audit.PROFILE`, legacy résumé paths, or guessed applicant facts.
 
 ---
 
@@ -144,20 +143,20 @@ They must **sleep on empty**, not `sys.exit`. Exit + `Restart=always` = restart 
 
 ### 4.1 `worker_internshala.py` (`jobhunt-is@is-w1`)
 - Portal `internshala`. Cap `IS_DAILY_CAP` (40). Resume upload. Cover from `jd_match`.
-- Session: `profiles/is_login`.
+- Session: exact claim-pinned canonical Internshala revision injected into a disposable context.
 - Sleep 30–45m when capped (date-partitioned).
 
 ### 4.2 `worker_wellfound.py` (`jobhunt-wf@w1/w2`)
 - Dialog-only apply. TrustArc / “WE VALUE YOUR PRIVACY” is **not** the apply modal.
 - `APPLY_DIALOG` excludes `#truste` / consent.
 - Tries `dynamic_ui.click(page, "wellfound", "apply")` then “Apply Now”.
-- Sponsorship / location / citizens gates via `jd_match.BLOCKERS`.
+- Sponsorship, location, compensation, and eligibility come only from the approved release and deterministic policy; unknown controls remain unanswered.
 - Category `/role/r/…` pages expand to `/jobs/<id>`.
 
 ### 4.3 `worker_linkedin.py` (`jobhunt-li@w1/w2`)
 - **Easy Apply only**. External ATS → `no-easy-apply` (correct, ~85% of cards).
-- Session `li_state.json`. Select existing resume — do not re-upload copies.
-- Relogin: `li_relogin.py` + `li_relogin_loop.sh` (Google chooser / SMS `otp.txt`).
+- Session: exact claim-pinned canonical LinkedIn revision injected into a disposable context. Select the approved résumé release.
+- `li_relogin.py` is the sole manual renewal owner. It acquires a portal lease and fencing token, stages an encrypted candidate, probes `/feed`, and promotes only a valid candidate. It never auto-retries challenge/phone/login flows.
 
 ### 4.4 `worker_yc.py` (`jobhunt-yc@w1`)
 - Company URL `/companies/<slug>` → expand to `/jobs/<id>` (`done expanded:N`).
@@ -166,7 +165,7 @@ They must **sleep on empty**, not `sys.exit`. Exit + `Restart=always` = restart 
 
 ### 4.5 `worker_external.py` (`jobhunt-ext@w1`)
 - Claims `portal='external'`.
-- `himalayas` → `himalayas_apply()` using **`profiles/hima_cap`** (cookie JSON values may be empty — do not `add_cookies` a blank jar).
+- `himalayas` requires a valid canonical Himalayas session and exact pinned revision. Sessionless sources such as We Work Remotely remain independently eligible.
 - `weworkremotely` → real ATS href or mailto. `job-copilot` / career-services → `wwr-upsell-not-apply` (not an apply).
 - Session-able sources should be **re-tagged** to `wellfound` / `internshala` rather than reimplemented.
 
@@ -184,13 +183,12 @@ They must **sleep on empty**, not `sys.exit`. Exit + `Restart=always` = restart 
 
 | Piece | Job |
 |---|---|
-| `portal_*.json` | Exported cookies (gitignored) |
-| `profiles/<name>` | Persistent Chromium dirs |
-| `portal_guard.py` | 12h live **probe** (not cookie TTL). `li_at` can look valid for a year and still be revoked. Himalayas `cf_clearance` is fingerprint-bound — **curl always fails**; probe in-browser. Never login while a scrape is running. |
-| `li_relogin.py` | Google SSO / GSI chooser / SMS |
-| `hima_one_shot.py` / `hima_fill_v9.py` | Himalayas login + onboard |
-| `wf_google_login.py` | Wellfound Google |
-| `naukri_cap4.py` | Parked capture (needs residential + human cookie export) |
+| `.private/sessions/<portal>/session-rN.enc` | Immutable Fernet-encrypted canonical revisions; directories `0700`, files `0600` |
+| `portal_sessions` / `portal_session_versions` | Privacy-safe current/previous pointers, health, opaque bundle references, and lifecycle metadata |
+| `browser_session_leases` | Portal-scoped exclusive renewal leases and monotonic fencing tokens |
+| `portal_guard.py` | Bounded read-only authenticated endpoint probe. It records `valid`, `expired`, `challenged`, or `unknown`; it cannot capture, stage, promote, or log in. |
+| `li_relogin.py` | Sole manual LinkedIn renewal owner using candidate → probe → promote under a fenced lease |
+| `scripts/migrate_portal_sessions.py` | One-time non-destructive legacy importer; source files are never modified or deleted |
 
 ---
 
@@ -209,9 +207,11 @@ Units in-repo:
 - `jobhunt-li@.service` — same shape
 - `jobhunt-is@.service` — `Restart=on-failure`, `IS_DAILY_CAP=40`
 
-Also typically installed (not all vendored): `jobhunt-yc@`, `jobhunt-ext@`, `jobhunt-review@`.
+Also installed: `jobhunt-yc@`, `jobhunt-ext@`, `jobhunt-review@`, and `jobhunt-email@`.
 
-`TMPDIR=/home/ubuntu/tmp_chrome` (or your disk path) on every unit.
+`jobhunt-session-probe.timer` runs the read-only canonical probe. `jobhunt-li-renew.service` is manual-only with `Restart=no`; there is deliberately no renewal timer. `systemd/canonical-runtime.conf` points every worker at the same production queue, control DB, key, and encrypted session vault.
+
+`TMPDIR=/home/ubuntu/tmp_chrome` (or your disk path) on every browser worker.
 
 `launch_workers.sh` — kill/relaunch wf+li. Prefer `systemctl` over `pkill` (self-match hazard).
 

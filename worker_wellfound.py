@@ -2,30 +2,38 @@
 """Wellfound apply worker. Claims wellfound jobs from queue, applies via dialog flow.
 Usage: python3 worker_wellfound.py <worker_id>
 """
-import json, os, re, sqlite3, sys, time, signal
+import json, os, re, sqlite3, sys, time, signal, shutil, tempfile
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 from playwright.sync_api import sync_playwright
 import audit
 import dynamic_ui
 from workflow.worker_telemetry import telemetry_for
+from workflow.portal_session_runtime import (
+    PortalSessionUnavailable,
+    current_session,
+    inject_current_session,
+)
+from workflow.application_gate import (
+    PublicationUnavailable,
+    eligible_for_claim,
+    pin_claim,
+    published_runtime,
+)
 import jd_match
 from workflow.browser_use_client import BrowserUseSidecar
 from submission_signals import has_submission_confirmation
 from title_filter import is_tech_title, title_rejection_reason
 from worker_guard import BrowserWatchdog, exit_if_fired
-import profile as ident
 
 GUARD = None  # active per-job BrowserWatchdog (set inside apply_one)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
-STATE = os.path.join(HERE, "portal_wellfound.json")
-RESUME = "/home/ubuntu/Documents/Pratham_Jaiswal_Updated_Resume.pdf"
+RESUME = ""
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "wf-w1"
 QUEUE_DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
 STATE_ROOT = os.getenv("JOBHUNT_STATE_ROOT", os.path.join(HERE, "state_queue"))
 PASSWORD = os.environ.get("WF_PASSWORD", "")
-SALARY_USD = os.environ.get("WF_SALARY_USD", "85000")
 RECOVERY_MODE = os.environ.get("JOBHUNT_RECOVERY_MODE", "disabled").lower()
 _worker_match = re.search(r"(\d+)$", WORKER_ID)
 _worker_number = int(_worker_match.group(1)) if _worker_match else 1
@@ -38,9 +46,33 @@ APPLY_DIALOG = "[role=dialog][aria-modal=true]:not([id*=truste]):not([id*=consen
 ANSWERS = {}
 SNAPS = {}
 
-PROFILE = {"name": ident.NAME, "email": ident.EMAIL,
-           "location": f"{ident.CITY}, India" if ident.CITY else "", "years": "1", "salary": SALARY_USD,
-           "note": "Full-stack & Solana engineer (Turbin3 cohort; 4 merged OSS PRs). Built AI crawler, DeFi credit scoring, RWA tokenization platform."}
+PROFILE = {}
+REQUIRED_FACTS = (
+    ("identity.name", "profile.name"),
+    ("contact.email", "profile.email"),
+    ("location.city", "profile.city"),
+    ("location.country", "profile.country"),
+    ("experience.years", "profile.years"),
+    ("skills.stack", "profile.stack"),
+    ("compensation.expected_usd", "profile.salary_usd"),
+    ("cover_note.default", "summary.pitch", "profile.note"),
+    ("work_authorization.requires_sponsorship", "profile.requires_sponsorship"),
+)
+
+
+def configure_publication(runtime):
+    global PROFILE, RESUME
+    PROFILE = {
+        "name": str(runtime.fact("identity.name", "profile.name")),
+        "email": str(runtime.fact("contact.email", "profile.email")),
+        "location": f"{runtime.fact('location.city', 'profile.city')}, {runtime.fact('location.country', 'profile.country')}",
+        "years": str(runtime.fact("experience.years", "profile.years")),
+        "stack": str(runtime.fact("skills.stack", "profile.stack")),
+        "salary": str(runtime.fact("compensation.expected_usd", "profile.salary_usd")),
+        "note": str(runtime.fact("cover_note.default", "summary.pitch", "profile.note")),
+        "requires_sponsorship": runtime.boolean_fact("work_authorization.requires_sponsorship", "profile.requires_sponsorship"),
+    }
+    RESUME = runtime.resume_path
 
 
 def safe_diagnostic_text(text):
@@ -58,7 +90,7 @@ def db():
 def telemetry():
     return telemetry_for(WORKER_ID, "wellfound", QUEUE_DB, STATE_ROOT)
 
-def claim():
+def claim(runtime):
     while True:
         c = db()
         row = c.execute("SELECT id, url, title FROM jobs WHERE portal='wellfound' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
@@ -70,9 +102,14 @@ def claim():
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", reason)
             continue
-        upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
+        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "wellfound"}):
+            c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
+            c.commit(); c.close()
+            telemetry().outcome(row[0], "skip", "policy-ineligible")
+            continue
+        upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
         c.commit(); c.close()
-        if upd.rowcount == 1:
+        if upd_count == 1:
             telemetry().claimed(row[0])
             return {"id": row[0], "url": row[1], "title": row[2]}
 
@@ -198,13 +235,13 @@ def apply_dialog_open(page) -> bool:
         return False
 
 
-def apply_one(url, jid=None):
+def apply_one(url, jid=None, expected_session_revision=None):
     global GUARD
     for attempt in range(2):
         GUARD = BrowserWatchdog(f"wf_w_{WORKER_ID}", max_sec=190, job=(jid, url))
         GUARD.start()
         try:
-            return _apply_one(url)
+            return _apply_one(url, expected_session_revision)
         except Exception as e:
             if GUARD.fired.is_set():
                 GUARD.stop()
@@ -217,21 +254,28 @@ def apply_one(url, jid=None):
             GUARD.stop()
     return (False, "exhausted-retries")
 
-def _apply_one(url):
+def _apply_one(url, expected_session_revision=None):
     global ANSWERS, SNAPS
     ANSWERS = {"name": PROFILE["name"], "email": PROFILE["email"],
                "location": PROFILE["location"], "years": PROFILE["years"],
-               "salary": PROFILE["salary"], "auth": "No"}
+               "salary": PROFILE["salary"],
+               "requires_sponsorship": PROFILE["requires_sponsorship"]}
     SNAPS = {}
+    profile_dir = tempfile.mkdtemp(prefix=f"wf-{WORKER_ID}-", dir=os.environ.get("TMPDIR"))
     with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(
-            user_data_dir=os.path.join(HERE, "profiles", f"wf_w_{WORKER_ID}"), executable_path=CLOAK, headless=True,
+            user_data_dir=profile_dir, executable_path=CLOAK, headless=True,
             args=["--no-first-run", "--no-default-browser-check", "--disable-blink-features=AutomationControlled",
                   "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={CDP_PORT}",
                   "--window-size=1400,900"])
-        if os.path.exists(STATE):
-            try: ctx.add_cookies(json.load(open(STATE)).get("cookies", []))
-            except Exception: pass
+        try:
+            session_revision = inject_current_session(
+                ctx, "wellfound", expected_revision=expected_session_revision
+            )
+            print(f"[{WORKER_ID}] session revision {session_revision} pinned", flush=True)
+        except PortalSessionUnavailable:
+            ctx.close()
+            raise RuntimeError("wellfound-session-required")
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.set_default_timeout(15000)
         page.set_default_navigation_timeout(20000)
@@ -368,7 +412,7 @@ def _apply_one(url):
                 jd_text = page.inner_text("body")[:6000]
             except Exception:
                 jd_text = ""
-            match = jd_match.analyze(jd_text)
+            match = jd_match.analyze(jd_text, approved_skills=PROFILE["stack"], approved_years=PROFILE["years"], blockers=False)
             ANSWERS["jd_matched"] = match.get("matched", [])
             ANSWERS["jd_gaps"] = match.get("gaps", [])
             ANSWERS["jd_senior"] = bool(match.get("senior"))
@@ -440,18 +484,16 @@ def _apply_one(url):
                         q = ""
                     q = (q or "").lower()
                     if "sponsor" in q:
-                        # honest answer to "require sponsorship?" is YES
                         try:
                             g = r.locator("xpath=ancestor::*[@role='group' or self::fieldset][1]")
-                            yes = g.locator("[role=radio][aria-label='Yes' i]").first
-                            if yes.count():
-                                yes.click()
+                            choice = "Yes" if PROFILE["requires_sponsorship"] else "No"
+                            target = g.locator(f"[role=radio][aria-label='{choice}' i]").first
+                            if target.count():
+                                target.click()
                         except Exception:
                             pass
-                        continue
-                    if "authoriz" in q:
-                        r.click()
-                    # unknown question -> leave untouched
+                    # Authorization and all unknown controls remain untouched unless
+                    # a separately approved boolean fact is published for them.
             except Exception:
                 pass
             # cover letter textarea — JD-tailored note, fallback to static profile note.
@@ -459,7 +501,7 @@ def _apply_one(url):
             # like "What interests you about this company?" as extra textareas —
             # leaving them empty blocks submission).
             try:
-                note_txt = (match.get("note") or PROFILE.get("note") or "").strip()
+                note_txt = (PROFILE.get("note") or "").strip()
                 if note_txt:
                     for ta in page.locator(APPLY_DIALOG + " textarea:visible").all():
                         try:
@@ -475,7 +517,7 @@ def _apply_one(url):
                     try:
                         nm = ci.evaluate("el => (el.getAttribute('name')||'') + '|' + (el.getAttribute('placeholder')||'')")
                         if ("customQuestion" in nm or "answer" in nm.lower()) and not ci.input_value().strip():
-                            ci.fill((match.get("note") or PROFILE.get("note") or "").strip()[:250])
+                            ci.fill((PROFILE.get("note") or "").strip()[:250])
                     except Exception:
                         pass
             except Exception:
@@ -625,20 +667,34 @@ def _apply_one(url):
         finally:
             try: ctx.close()
             except Exception: pass
+            shutil.rmtree(profile_dir, ignore_errors=True)
 
 def main():
     def _alarm(signum, frame):
         raise TimeoutError("job hard timeout")
     signal.signal(signal.SIGALRM, _alarm)
     while True:
-        job = claim()
+        try:
+            runtime = published_runtime("wellfound", REQUIRED_FACTS)
+            configure_publication(runtime)
+            session_snapshot = current_session("wellfound")
+        except PublicationUnavailable:
+            print(f"[{WORKER_ID}] published profile/policy not ready — waiting before claim", flush=True)
+            time.sleep(300)
+            continue
+        except PortalSessionUnavailable:
+            print(f"[{WORKER_ID}] session not valid — stopping before claim", flush=True)
+            return
+        job = claim(runtime)
         if not job:
             print(f"[{WORKER_ID}] queue empty, sleep", flush=True)
             time.sleep(60); continue
         print(f"[{WORKER_ID}] claim: {job['title'][:50]}", flush=True)
         signal.alarm(180)  # no job may hang the worker longer than 3 minutes
         try:
-            ok, reason = apply_one(job["url"], job["id"])
+            ok, reason = apply_one(
+                job["url"], job["id"], session_snapshot.revision
+            )
         except Exception as e:
             ok, reason = False, f"hard-timeout|{str(e)[:60]}"
         finally:

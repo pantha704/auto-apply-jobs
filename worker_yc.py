@@ -11,13 +11,24 @@ Audits every attempt via audit.record_application.
 
 Usage: python3 worker_yc.py <worker_id>
 """
-import json, os, re, sqlite3, sys, time, signal
+import os, re, sqlite3, sys, time, signal, shutil, tempfile
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 from worker_guard import BrowserWatchdog
 from playwright.sync_api import sync_playwright
 import audit
 import dynamic_ui
 from workflow.worker_telemetry import telemetry_for
+from workflow.portal_session_runtime import (
+    PortalSessionUnavailable,
+    current_session,
+    inject_current_session,
+)
+from workflow.application_gate import (
+    PublicationUnavailable,
+    eligible_for_claim,
+    pin_claim,
+    published_runtime,
+)
 import jd_match
 from job_identity import stable_job_id
 from submission_signals import has_submission_confirmation
@@ -25,9 +36,23 @@ from title_filter import title_rejection_reason
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
-PROFILE = os.path.join(HERE, "profiles", "yc_cap")
-STATE = os.path.join(HERE, "portal_yc.json")
-RESUME = "/home/ubuntu/Documents/Pratham_Jaiswal_Updated_Resume.pdf"
+RESUME = ""
+PUBLISHED_NOTE = ""
+PUBLISHED_STACK = ""
+PUBLISHED_YEARS = ""
+REQUIRED_FACTS = (
+    ("cover_note.default", "summary.pitch", "profile.note"),
+    ("skills.stack", "profile.stack"),
+    ("experience.years", "profile.years"),
+)
+
+
+def configure_publication(runtime):
+    global RESUME, PUBLISHED_NOTE, PUBLISHED_STACK, PUBLISHED_YEARS
+    RESUME = runtime.resume_path
+    PUBLISHED_NOTE = str(runtime.fact("cover_note.default", "summary.pitch", "profile.note"))
+    PUBLISHED_STACK = str(runtime.fact("skills.stack", "profile.stack"))
+    PUBLISHED_YEARS = str(runtime.fact("experience.years", "profile.years"))
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "yc-w1"
 QUEUE_DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
 STATE_ROOT = os.getenv("JOBHUNT_STATE_ROOT", os.path.join(HERE, "state_queue"))
@@ -52,18 +77,23 @@ def db():
 def telemetry():
     return telemetry_for(WORKER_ID, "yc", QUEUE_DB, STATE_ROOT)
 
-def claim():
+def claim(runtime):
     c = db()
     row = c.execute("SELECT id, url, title FROM jobs WHERE portal='yc' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
     if not row:
         c.close()
         telemetry().idle()
         return None
-    upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
+    if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "yc"}):
+        c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
+        c.commit(); c.close()
+        telemetry().outcome(row[0], "skip", "policy-ineligible")
+        return claim(runtime)
+    upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
     c.commit()
     c.close()
-    if upd.rowcount != 1:
-        return claim()
+    if upd_count != 1:
+        return claim(runtime)
     telemetry().claimed(row[0])
     return {"id": row[0], "url": row[1], "title": row[2]}
 
@@ -110,7 +140,7 @@ def apply_job(page, job):
         return ("skip", "already-applied", "")
 
     # JD match triage (blockers: citizens-only, clearance, stack-mismatch)
-    res = jd_match.analyze(body[:6000])
+    res = jd_match.analyze(body[:6000], approved_skills=PUBLISHED_STACK, approved_years=PUBLISHED_YEARS, blockers=False)
     if res["decision"] == "skip":
         return ("skip", res["reason"], "")
 
@@ -144,7 +174,7 @@ def apply_job(page, job):
     if not ta:
         return ("skip", "no-apply-modal", "")
 
-    note = res["note"] or "Hi! I'm Pratham Jaiswal, a full-stack developer building with TypeScript, React, Node.js and Python. I'd love to contribute to your team."
+    note = PUBLISHED_NOTE
     try:
         ta.click()
         ta.fill(note)
@@ -177,21 +207,57 @@ def apply_job(page, job):
         pass
     return ("skip", "send-unconfirmed", "")
 
+def _open_runtime_context(playwright, expected_session_revision=None):
+    profile_dir = tempfile.mkdtemp(
+        prefix=f"yc-{WORKER_ID}-", dir=os.environ.get("TMPDIR")
+    )
+    ctx = None
+    try:
+        ctx = playwright.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            executable_path=CLOAK,
+            headless=True,
+            args=[
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-blink-features=AutomationControlled",
+                "--window-size=1400,900",
+                "--remote-debugging-address=127.0.0.1",
+                f"--remote-debugging-port={CDP_PORT}",
+            ],
+        )
+        revision = inject_current_session(
+            ctx, "yc", expected_revision=expected_session_revision
+        )
+        log(f"session revision {revision} pinned")
+        return ctx, profile_dir
+    except Exception:
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        raise
+
+
+def _close_runtime_context(ctx, profile_dir):
+    try:
+        ctx.close()
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+
+
 def apply_url(url):
     """Standalone apply attempt for one YC URL (used by the reviewer worker).
     Returns (status, result, note) — never touches the queue."""
+    ctx = profile_dir = None
     try:
+        runtime = published_runtime("yc", REQUIRED_FACTS)
+        configure_publication(runtime)
+        session_snapshot = current_session("yc")
         with sync_playwright() as p:
-            ctx = p.chromium.launch_persistent_context(
-                user_data_dir=PROFILE, executable_path=CLOAK, headless=True,
-                args=["--no-first-run", "--no-default-browser-check",
-                      "--disable-blink-features=AutomationControlled", "--window-size=1400,900",
-                      "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={CDP_PORT}"])
-            if os.path.exists(STATE):
-                try:
-                    ctx.add_cookies(json.load(open(STATE)).get("cookies", []))
-                except Exception:
-                    pass
+            ctx, profile_dir = _open_runtime_context(p, session_snapshot.revision)
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.add_init_script(STEALTH)
             page.set_default_timeout(20000)
@@ -199,30 +265,25 @@ def apply_url(url):
             page.goto(url, wait_until="domcontentloaded")
             page.wait_for_timeout(4000)
             if re.search(r"/companies/[^/]+$", url) and not re.search(r"/jobs/\d+", url):
-                ctx.close()
                 return ("skip", "company-page", "")
-            res = apply_job(page, {"url": url})
-            ctx.close()
-            return res
+            return apply_job(page, {"url": url})
+    except PublicationUnavailable:
+        return ("skip", "published-profile-policy-required", "")
+    except PortalSessionUnavailable:
+        return ("skip", "yc-session-required", "")
     except Exception as e:
         return ("skip", f"error|{str(e)[:100]}", "")
+    finally:
+        if ctx is not None and profile_dir is not None:
+            _close_runtime_context(ctx, profile_dir)
 
 
-def handle(job):
+def handle(job, expected_session_revision=None):
     url = job["url"] or ""
+    ctx = profile_dir = None
     try:
         with sync_playwright() as p:
-            ctx = p.chromium.launch_persistent_context(
-                user_data_dir=PROFILE, executable_path=CLOAK, headless=True,
-                args=["--no-first-run", "--no-default-browser-check",
-                      "--disable-blink-features=AutomationControlled", "--window-size=1400,900",
-                      "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={CDP_PORT}"])
-            # fallback: inject banked session cookies too
-            if os.path.exists(STATE):
-                try:
-                    ctx.add_cookies(json.load(open(STATE)).get("cookies", []))
-                except Exception:
-                    pass
+            ctx, profile_dir = _open_runtime_context(p, expected_session_revision)
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.add_init_script(STEALTH)
             page.set_default_timeout(20000)
@@ -245,17 +306,30 @@ def handle(job):
                     mark(job["id"], "done", "submitted")
                 else:
                     mark(job["id"], "skip", result)
-            ctx.close()
     except Exception as e:
         mark(job["id"], "pending", "")  # requeue on infra errors
         log(f"err on {url}: {str(e)[:120]}")
         time.sleep(3)
+    finally:
+        if ctx is not None and profile_dir is not None:
+            _close_runtime_context(ctx, profile_dir)
 
 def main():
-    log(f"started (profile={PROFILE})")
+    log("started (isolated canonical sessions)")
     idle = 0
     while RUNNING:
-        job = claim()
+        try:
+            runtime = published_runtime("yc", REQUIRED_FACTS)
+            configure_publication(runtime)
+            session_snapshot = current_session("yc")
+        except PublicationUnavailable:
+            log("published profile/policy not ready — waiting before claim")
+            time.sleep(300)
+            continue
+        except PortalSessionUnavailable:
+            log("session not valid — stopping before claim")
+            return
+        job = claim(runtime)
         if not job:
             idle += 1
             # WAIT instead of exiting: an empty queue must NOT crash-loop the
@@ -270,7 +344,7 @@ def main():
         GUARD = BrowserWatchdog("yc_cap", max_sec=240, job=(job["id"], job["url"]))
         GUARD.start()
         try:
-            handle(job)
+            handle(job, session_snapshot.revision)
         finally:
             GUARD.stop()
         if GUARD.fired.is_set():

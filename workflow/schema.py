@@ -4,8 +4,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-QUEUE_VERSION = 2
-CONTROL_VERSION = 6
+QUEUE_VERSION = 3
+CONTROL_VERSION = 7
 
 
 def _now() -> str:
@@ -14,6 +14,13 @@ def _now() -> str:
 
 def _columns(db: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+
+
+def _tables(db: sqlite3.Connection) -> set[str]:
+    return {
+        row[0]
+        for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
 
 
 def _execute_script(db: sqlite3.Connection, script: str) -> None:
@@ -239,6 +246,36 @@ def migrate_queue(path: str | Path) -> list[int]:
                 (2, _now()),
             )
             applied.append(2)
+        if 3 not in seen:
+            job_columns = _columns(db, "jobs")
+            job_additions = {
+                "candidate_profile_id": "TEXT",
+                "candidate_profile_revision": "INTEGER",
+                "resume_version_id": "TEXT",
+                "preference_set_version": "INTEGER",
+                "portal_session_revision": "INTEGER",
+            }
+            for name, declaration in job_additions.items():
+                if name not in job_columns:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+            run_columns = _columns(db, "application_runs")
+            run_additions = {
+                "candidate_profile_revision": "INTEGER",
+                "preference_set_version": "INTEGER",
+                "portal_session_revision": "INTEGER",
+            }
+            for name, declaration in run_additions.items():
+                if name not in run_columns:
+                    db.execute(f"ALTER TABLE application_runs ADD COLUMN {name} {declaration}")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_pinned_revisions "
+                "ON jobs(status,candidate_profile_revision,preference_set_version,portal_session_revision)"
+            )
+            db.execute(
+                "INSERT INTO schema_migrations(database_name,version,applied_at) VALUES('queue',?,?)",
+                (3, _now()),
+            )
+            applied.append(3)
         db.commit()
         return applied
     except Exception:
@@ -765,6 +802,79 @@ def migrate_control(path: str | Path) -> list[int]:
                 (6, _now()),
             )
             applied.append(6)
+        if 7 not in seen:
+            lease_columns = _columns(db, "browser_session_leases")
+            if "lease_token" not in lease_columns:
+                db.execute(
+                    "ALTER TABLE browser_session_leases ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''"
+                )
+            if "fencing_token" not in lease_columns:
+                db.execute(
+                    "ALTER TABLE browser_session_leases ADD COLUMN fencing_token INTEGER NOT NULL DEFAULT 0"
+                )
+            _execute_script(
+                db,
+                """
+                CREATE TABLE portal_sessions (
+                  portal TEXT PRIMARY KEY,
+                  state TEXT NOT NULL CHECK(state IN (
+                    'unknown','probing','valid','expired','challenged',
+                    'renewing','operator_required','disabled'
+                  )) DEFAULT 'unknown',
+                  current_version_id TEXT,
+                  previous_version_id TEXT,
+                  last_probe_at TEXT,
+                  last_success_at TEXT,
+                  failure_code TEXT,
+                  safe_detail TEXT,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE portal_session_versions (
+                  id TEXT PRIMARY KEY,
+                  portal TEXT NOT NULL,
+                  revision INTEGER NOT NULL,
+                  lifecycle TEXT NOT NULL CHECK(lifecycle IN (
+                    'candidate','current','previous','rejected'
+                  )),
+                  bundle_path TEXT NOT NULL UNIQUE,
+                  bundle_sha256 TEXT NOT NULL,
+                  probe_state TEXT CHECK(probe_state IN (
+                    'valid','expired','challenged','unknown'
+                  )),
+                  probe_at TEXT,
+                  safe_detail TEXT,
+                  created_at TEXT NOT NULL,
+                  promoted_at TEXT,
+                  UNIQUE(portal, revision),
+                  FOREIGN KEY(portal) REFERENCES portal_sessions(portal)
+                );
+                CREATE INDEX idx_portal_versions_lifecycle
+                  ON portal_session_versions(portal,lifecycle,revision DESC);
+                CREATE TABLE portal_session_events (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  portal TEXT NOT NULL,
+                  version_id TEXT,
+                  event TEXT NOT NULL,
+                  state TEXT,
+                  safe_detail TEXT,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(portal) REFERENCES portal_sessions(portal),
+                  FOREIGN KEY(version_id) REFERENCES portal_session_versions(id)
+                );
+                CREATE INDEX idx_portal_session_events_time
+                  ON portal_session_events(portal,created_at DESC);
+                """,
+            )
+            if "sites" in _tables(db) and {"adapter", "session_ref"} <= _columns(db, "sites"):
+                db.execute(
+                    """UPDATE sites SET session_ref='canonical:' || adapter
+                       WHERE adapter IN ('linkedin','wellfound','internshala','yc')"""
+                )
+            db.execute(
+                "INSERT INTO schema_migrations(database_name,version,applied_at) VALUES('control',?,?)",
+                (7, _now()),
+            )
+            applied.append(7)
         db.commit()
         return applied
     except Exception:

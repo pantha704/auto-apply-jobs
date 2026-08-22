@@ -6,11 +6,22 @@ Claims external jobs and routes them:
   - yc / naukri: no captured session → needs-login skip
 Usage: python3 worker_external.py <worker_id>
 """
-import json, os, re, sqlite3, sys, time, signal
+import os, re, shutil, sqlite3, sys, tempfile, time, signal
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 from worker_guard import BrowserWatchdog
 import dynamic_ui
 from workflow.worker_telemetry import telemetry_for
+from workflow.application_gate import (
+    PublicationUnavailable,
+    eligible_for_claim,
+    pin_claim,
+    published_runtime,
+)
+from workflow.portal_session_runtime import (
+    PortalSessionUnavailable,
+    current_session,
+    inject_current_session,
+)
 from title_filter import title_rejection_reason
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -21,6 +32,13 @@ STATE_ROOT = os.getenv("JOBHUNT_STATE_ROOT", os.path.join(HERE, "state_queue"))
 _worker_match = re.search(r"(\d+)$", WORKER_ID)
 CDP_PORT = int(os.environ.get("EXT_CDP_PORT", str(9380 + (int(_worker_match.group(1)) if _worker_match else 1))))
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
+PUBLISHED_NOTE = ""
+REQUIRED_FACTS = (("cover_note.default", "summary.pitch", "profile.note"),)
+
+
+def configure_publication(runtime):
+    global PUBLISHED_NOTE
+    PUBLISHED_NOTE = str(runtime.fact("cover_note.default", "summary.pitch", "profile.note"))
 
 def log(msg):
     print(f"[{WORKER_ID}] [{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -36,7 +54,7 @@ def db():
 def telemetry():
     return telemetry_for(WORKER_ID, "external", QUEUE_DB, STATE_ROOT)
 
-def claim():
+def claim(runtime):
     while True:
         c = db()
         row = c.execute("SELECT id, url, title, source FROM jobs WHERE portal='external' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
@@ -50,9 +68,14 @@ def claim():
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", reason)
             continue
-        upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
+        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "external", "source": row[3] or ""}):
+            c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
+            c.commit(); c.close()
+            telemetry().outcome(row[0], "skip", "policy-ineligible")
+            continue
+        upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
         c.commit(); c.close()
-        if upd.rowcount == 1:
+        if upd_count == 1:
             telemetry().claimed(row[0])
             return {"id": row[0], "url": row[1], "title": row[2], "source": row[3]}
 
@@ -62,75 +85,40 @@ def mark(jid, status, result=""):
     c.commit(); c.close()
     telemetry().outcome(jid, status, result)
 
-def route(job):
+def route(job, expected_session_revision=None):
     src = (job.get("source") or "").lower()
     u = job["url"] or ""
     if "weworkremotely.com" in u or src == "weworkremotely":
         return wwr_apply(u)
     if "himalayas.app" in u or src == "himalayas":
-        return himalayas_apply(u)
+        return himalayas_apply(u, expected_session_revision)
     if "workatastartup.com" in u or src == "yc":
         return (False, "needs-login:yc")
     if "naukri.com" in u or src == "naukri":
         return (False, "needs-login:naukri")
     return (False, f"unhandled-source:{src}")
 
-def himalayas_apply(url):
-    """Himalayas apply — live talent session from portal_himalayas.json.
-
-    Flow (learned 2026-08-16, see skill pitfall 41):
-      1. CF challenge -> raw pixel click at (212,336) on 1280x720
-      2. click first 'Apply now' button, wait ~7s (modal renders slowly)
-      3. 'Location not eligible' dialog -> skip location-block (honest)
-      4. AI-upsell interstitial -> click 'Don't show this again' + 'I'm ready to apply'
-      5. form with textarea + submit -> fill cover note, submit
-      6. success = POST 2xx to *application* URL OR success text OR button flips 'Applied'
-    """
-    state_file = os.path.join(HERE, "portal_himalayas.json")
-    try:
-        cookies = json.load(open(state_file)).get("cookies", [])
-    except Exception:
-        cookies = []
-    if not any(c.get("name") == "himalayas_app_session" for c in cookies):
-        # still try the persistent profile — the JSON jar can have empty values
-        pass
-    NOTE = ("Full-stack engineer (TypeScript/Python/Rust) with 1 year of experience, "
-            "based in Kolkata, open to remote roles.")
+def himalayas_apply(url, expected_session_revision=None):
+    """Apply through one isolated context loaded from a pinned canonical revision."""
+    if expected_session_revision is None:
+        return (False, "himalayas-session-required")
+    NOTE = PUBLISHED_NOTE
     SUCCESS_TXT = ("application sent", "has been sent", "application submitted",
                    "we've received your application", "applied successfully")
-    # Playwright rejects cookies with empty values. Prefer the live persistent
-    # profile (hima_cap) which still holds the real session from the onboard fill.
-    HIMA_PROF = os.path.join(HERE, "profiles", "hima_cap")
-    usable = []
-    for c in cookies:
-        if not c.get("name") or not c.get("value"):
-            continue
-        cc = {k: c[k] for k in ("name", "value", "domain", "path") if k in c}
-        if c.get("expires") not in (None, -1, 0, ""):
-            try:
-                cc["expires"] = float(c["expires"])
-            except Exception:
-                pass
-        ss = c.get("sameSite")
-        if ss in ("Strict", "Lax", "None"):
-            cc["sameSite"] = ss
-        if c.get("secure"):
-            cc["secure"] = True
-        if c.get("httpOnly"):
-            cc["httpOnly"] = True
-        usable.append(cc)
+    profile_dir = tempfile.mkdtemp(
+        prefix=f"himalayas-{WORKER_ID}-", dir=os.environ.get("TMPDIR")
+    )
     try:
         with sync_playwright() as p:
             ctx = p.chromium.launch_persistent_context(
-                user_data_dir=HIMA_PROF, executable_path=CLOAK, headless=True,
+                user_data_dir=profile_dir, executable_path=CLOAK, headless=True,
                 args=["--no-first-run", "--no-default-browser-check", "--disable-blink-features=AutomationControlled",
                       "--window-size=1280,720", "--remote-debugging-address=127.0.0.1",
                       f"--remote-debugging-port={CDP_PORT}"])
-            if usable:
-                try:
-                    ctx.add_cookies(usable)
-                except Exception:
-                    pass
+            revision = inject_current_session(
+                ctx, "himalayas", expected_revision=expected_session_revision
+            )
+            log(f"himalayas session revision {revision} pinned")
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.set_default_timeout(15000)
             page.set_default_navigation_timeout(30000)
@@ -230,6 +218,8 @@ def himalayas_apply(url):
                 return (False, "no-apply-form")
     except Exception as e:
         return (False, f"err:{str(e)[:80]}")
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
 def wwr_apply(url):
     """WWR: check job page is alive (not homepage redirect), then attempt apply."""
@@ -293,12 +283,38 @@ def wwr_apply(url):
     except Exception as e:
         return (False, f"err:{str(e)[:80]}")
 
+def next_pending_requires_himalayas_session():
+    c = db()
+    try:
+        row = c.execute(
+            "SELECT url,source FROM jobs WHERE portal='external' AND status='pending' "
+            "ORDER BY prio DESC,rowid LIMIT 1"
+        ).fetchone()
+    finally:
+        c.close()
+    if not row:
+        return False
+    return "himalayas.app" in (row[0] or "") or (row[1] or "").lower() == "himalayas"
+
+
 def main():
     def _alarm(signum, frame):
         raise TimeoutError("job hard timeout")
     signal.signal(signal.SIGALRM, _alarm)
     while True:
-        job = claim()
+        requires_himalayas = next_pending_requires_himalayas_session()
+        try:
+            runtime = published_runtime(
+                "himalayas" if requires_himalayas else None,
+                REQUIRED_FACTS,
+                require_session=requires_himalayas,
+            )
+            configure_publication(runtime)
+        except PublicationUnavailable:
+            log("published profile/policy/session not ready — waiting before claim")
+            time.sleep(300)
+            continue
+        job = claim(runtime)
         if not job:
             log("queue empty, sleep")
             time.sleep(60); continue
@@ -308,7 +324,10 @@ def main():
                                 job=(job["id"], job["url"]))
         GUARD.start()
         try:
-            ok, reason = route(job)
+            ok, reason = route(
+                job,
+                runtime.session_revision if runtime.session_revision > 0 else None,
+            )
         except Exception as e:
             ok, reason = False, f"hard-timeout|{str(e)[:60]}"
         finally:

@@ -64,6 +64,7 @@ class Settings(BaseModel):
     vault_key: Path
     resume: Path
     resume_storage: Path
+    session_storage: Path
     auth_disabled: bool
     username: str
     password: str
@@ -77,6 +78,7 @@ def settings() -> Settings:
         vault_key=Path(os.getenv("JOBHUNT_VAULT_KEY", ROOT / ".controlplane.key")),
         resume=Path(os.getenv("JOBHUNT_RESUME", ROOT / "resume.pdf")),
         resume_storage=Path(os.getenv("JOBHUNT_RESUME_STORAGE", ROOT / ".private" / "resumes")),
+        session_storage=Path(os.getenv("JOBHUNT_SESSION_STORAGE", ROOT / ".private" / "sessions")),
         auth_disabled=os.getenv("JOBHUNT_DASHBOARD_AUTH_DISABLED", "0") == "1",
         username=os.getenv("JOBHUNT_DASHBOARD_USER", ""),
         password=os.getenv("JOBHUNT_DASHBOARD_PASSWORD", ""),
@@ -164,28 +166,28 @@ def bootstrap_existing_sites() -> None:
             "https://www.linkedin.com/jobs",
             "linkedin",
             "session",
-            "li_state.json",
+            "canonical:linkedin",
         ),
         (
             "Wellfound",
             "https://wellfound.com/jobs",
             "wellfound",
             "session",
-            "portal_wellfound.json",
+            "canonical:wellfound",
         ),
         (
             "Internshala",
             "https://internshala.com/jobs",
             "internshala",
             "session",
-            "profiles/is_login",
+            "canonical:internshala",
         ),
         (
             "Y Combinator",
             "https://www.workatastartup.com/jobs",
             "yc",
             "session",
-            "profiles/yc_cap",
+            "canonical:yc",
         ),
     ]
     ts = now()
@@ -617,9 +619,14 @@ def site_public(row: sqlite3.Row) -> dict:
     )
     username = decrypt(row["username_enc"])
     session_ref = row["session_ref"]
-    session_path = Path(session_ref) if session_ref else None
-    if session_path and not session_path.is_absolute():
-        session_path = ROOT / session_path
+    session_status = None
+    if row["auth_type"] == "session" and adapter in {
+        "linkedin", "wellfound", "internshala", "yc", "himalayas", "naukri"
+    }:
+        try:
+            session_status = _session_manager().public_status(adapter)
+        except (OSError, sqlite3.Error, ValueError):
+            session_status = {"state": "unknown", "current_revision": None, "last_probe_at": None}
     auth_ready = (
         row["auth_type"] == "none"
         or (
@@ -628,7 +635,7 @@ def site_public(row: sqlite3.Row) -> dict:
         )
         or (
             row["auth_type"] == "session"
-            and bool(session_path and session_path.exists())
+            and bool(session_status and session_status["state"] == "valid")
         )
     )
     return {
@@ -641,7 +648,10 @@ def site_public(row: sqlite3.Row) -> dict:
         "auth_type": row["auth_type"],
         "username_masked": mask(username),
         "credential_configured": auth_ready,
-        "session_ref_configured": bool(session_ref),
+        "session_ref_configured": bool(session_status and session_status["current_revision"] is not None),
+        "session_state": session_status["state"] if session_status else None,
+        "session_revision": session_status["current_revision"] if session_status else None,
+        "session_last_probe_at": session_status["last_probe_at"] if session_status else None,
         "enabled": bool(row["enabled"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -1409,6 +1419,16 @@ def _require_workflow(*, queue: bool = False) -> None:
         raise HTTPException(503, "workflow database migration is not available")
 
 
+def _session_manager():
+    from workflow.portal_sessions import PortalSessionManager
+
+    return PortalSessionManager(
+        settings().control_db,
+        settings().session_storage,
+        _vault(),
+    )
+
+
 def _profile_service():
     from workflow.profile_service import ProfileService
     return ProfileService(settings().control_db, settings().resume_storage, _vault())
@@ -1481,6 +1501,21 @@ def workflow_profiles() -> dict:
             FROM candidate_profiles p LEFT JOIN candidate_facts f ON f.profile_id=p.id
             GROUP BY p.id ORDER BY p.revision DESC""").fetchall()
     return {"available": True, "items": [dict(row) for row in rows]}
+
+
+@app.get("/api/workflow/sessions")
+def workflow_sessions() -> dict:
+    _require_workflow()
+    return {"sessions": _session_manager().list_public_statuses()}
+
+
+@app.get("/api/workflow/sessions/{portal}")
+def workflow_session(portal: str) -> dict:
+    _require_workflow()
+    try:
+        return _session_manager().public_status(portal)
+    except ValueError as exc:
+        raise HTTPException(404, "unknown portal") from exc
 
 
 @app.get("/api/workflow/candidate")

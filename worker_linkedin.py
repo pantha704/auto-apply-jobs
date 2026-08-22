@@ -7,16 +7,25 @@ os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 import audit
 import dynamic_ui
 from workflow.worker_telemetry import telemetry_for
+from workflow.portal_session_runtime import (
+    PortalSessionUnavailable,
+    current_session,
+    inject_current_session,
+)
+from workflow.application_gate import (
+    PublicationUnavailable,
+    eligible_for_claim,
+    pin_claim,
+    published_runtime,
+)
 import jd_match
 from title_filter import title_rejection_reason
 from worker_guard import BrowserWatchdog
-import profile as ident
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
 CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
-STATE = os.path.join(HERE, "li_state.json")
-RESUME = "/home/ubuntu/Documents/Pratham_Jaiswal_Updated_Resume.pdf"
+RESUME = ""
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "li-w1"
 STATE_ROOT = os.getenv("JOBHUNT_STATE_ROOT", os.path.join(HERE, "state_queue"))
 _worker_match = re.search(r"(\d+)$", WORKER_ID)
@@ -24,17 +33,44 @@ CDP_PORT = int(os.environ.get("LI_CDP_PORT", str(9370 + (int(_worker_match.group
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 STEALTH = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
 
-PROFILE_DATA = {
-    "phone": ident.PHONE,
-    "address": ident.ADDRESS,
-    "city": ident.CITY, "state": ident.STATE, "pin": ident.PIN,
-    "linkedin": "https://www.linkedin.com/in/pantha704",
-    "portfolio": "https://pantha704.github.io",
-    "college": ident.COLLEGE,
-    "expected": "700000", "current": "480000", "notice": "0",
-    "stack": "TypeScript, JavaScript, Python, Rust, Node.js, Next.js, React, Tailwind CSS, PostgreSQL, Prisma, Redis, Docker, Kubernetes, Solana/Anchor, REST APIs, WebSockets",
-    "pitch": "Full-stack & Solana engineer in Turbin3 cohort; 4 merged OSS PRs (Rust, PyTorch, DeepMind, CircuitVerse); shipped AI crawler, DeFi credit scoring, RWA platform.",
-}
+PROFILE_DATA = {}
+REQUIRED_FACTS = (
+    ("contact.phone", "profile.phone"),
+    ("contact.address", "profile.address"),
+    ("location.city", "profile.city"),
+    ("location.state", "profile.state"),
+    ("location.postal_code", "profile.pin"),
+    ("urls.linkedin", "profile.linkedin"),
+    ("urls.portfolio", "profile.portfolio"),
+    ("education.college", "profile.college"),
+    ("compensation.expected_inr", "profile.expected"),
+    ("compensation.current_inr", "profile.current"),
+    ("employment.notice_days", "profile.notice"),
+    ("experience.years", "profile.years"),
+    ("skills.stack", "profile.stack"),
+    ("summary.pitch", "profile.pitch"),
+)
+
+
+def configure_publication(runtime):
+    global PROFILE_DATA, RESUME
+    PROFILE_DATA = {
+        "phone": str(runtime.fact("contact.phone", "profile.phone")),
+        "address": str(runtime.fact("contact.address", "profile.address")),
+        "city": str(runtime.fact("location.city", "profile.city")),
+        "state": str(runtime.fact("location.state", "profile.state")),
+        "pin": str(runtime.fact("location.postal_code", "profile.pin")),
+        "linkedin": str(runtime.fact("urls.linkedin", "profile.linkedin")),
+        "portfolio": str(runtime.fact("urls.portfolio", "profile.portfolio")),
+        "college": str(runtime.fact("education.college", "profile.college")),
+        "expected": str(runtime.fact("compensation.expected_inr", "profile.expected")),
+        "current": str(runtime.fact("compensation.current_inr", "profile.current")),
+        "notice": str(runtime.fact("employment.notice_days", "profile.notice")),
+        "years": str(runtime.fact("experience.years", "profile.years")),
+        "stack": str(runtime.fact("skills.stack", "profile.stack")),
+        "pitch": str(runtime.fact("summary.pitch", "profile.pitch")),
+    }
+    RESUME = runtime.resume_path
 ZERO_TOPICS = ["go", "banking", "php", "laravel", "java", "excel", "wordpress", "django", "embedded", "iot", "excel"]
 ONE_TOPICS = ["python", "typescript", "react", "node", "javascript", "database", "postgres", "sql",
               "full stack", "frontend", "backend", "software", "development", "information technology", "it "]
@@ -45,7 +81,7 @@ def db():
 def telemetry():
     return telemetry_for(WORKER_ID, "linkedin", DB, STATE_ROOT)
 
-def claim(portal):
+def claim(portal, runtime):
     while True:
         c = db()
         row = c.execute("SELECT id, url, title FROM jobs WHERE portal=? AND status='pending' ORDER BY prio DESC, rowid LIMIT 1", (portal,)).fetchone()
@@ -57,9 +93,14 @@ def claim(portal):
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", reason)
             continue
-        upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
+        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": portal}):
+            c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
+            c.commit(); c.close()
+            telemetry().outcome(row[0], "skip", "policy-ineligible")
+            continue
+        upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
         c.commit(); c.close()
-        if upd.rowcount == 1:
+        if upd_count == 1:
             telemetry().claimed(row[0])
             return {"id": row[0], "url": row[1], "title": row[2]}
 
@@ -159,9 +200,8 @@ def answer_page(page):
               return el ? [...el.options].map(o=>o.text.trim()) : [];
             }}""")
             if opts and "Yes" in opts and "No" in opts:
-                choice = "No" if any(k in low for k in ["relocat", "commut", "bangalore", "current", "located near"]) else ("Yes" if any(k in low for k in ["onsite", "office", "internet", "18", "work"] ) else "No")
-                if "education" in low or "degree" in low: choice = "No"
-                if "start" in low or "notice" in low: choice = None
+                # Unknown binary controls are intentionally left unanswered.
+                choice = None
                 if choice and js_text(page, lab, choice): n += 1
         if f["tag"] in ("INPUT", "TEXTAREA") and f["type"] in ("text", "tel", ""):
             if any(k in low for k in ["experience", "years", "salary", "ctc", "notice", "phone", "postal", "pin", "date", "start", "address", "city", "state", "gpa", "skills", "technolog", "framework", "unique", "url", "portfolio", "college", "university", "company", "title", "location", "lwd"]):
@@ -187,15 +227,26 @@ def answer_page(page):
                 elif "gpa" in low: val = ""  # skip GPA
                 elif "experience" in low or "years" in low:
                     if any(k in low for k in ZERO_TOPICS): val = "0"
-                    elif any(k in low for k in ONE_TOPICS): val = "1"
-                    else: val = "1"
+                    elif any(k in low for k in ONE_TOPICS): val = PROFILE_DATA["years"]
+                    else: val = None
                 if val is not None and f["value"] == "":
                     if js_text(page, lab, val): n += 1
     return n
 
 def main():
     while True:
-        job = claim("linkedin")
+        try:
+            runtime = published_runtime("linkedin", REQUIRED_FACTS)
+            configure_publication(runtime)
+            session_snapshot = current_session("linkedin")
+        except PublicationUnavailable:
+            log("PUBLISHED PROFILE/POLICY NOT READY — waiting before claim")
+            time.sleep(300)
+            continue
+        except PortalSessionUnavailable:
+            log("LINKEDIN SESSION NOT VALID — stopping before claim")
+            os._exit(12)
+        job = claim("linkedin", runtime)
         if not job:
             log("queue empty, sleeping")
             time.sleep(60)
@@ -204,7 +255,7 @@ def main():
         GUARD = BrowserWatchdog(f"li_w_{WORKER_ID}", max_sec=240, job=(job["id"], job["url"]))
         GUARD.start()
         try:
-            ok = apply_job(job["url"])
+            ok = apply_job(job["url"], session_snapshot.revision)
         except LinkedInAuthRequired:
             mark(job["id"], "pending", "linkedin-session-required")
             log("LINKEDIN SESSION REQUIRED — job requeued; stopping for session renewal")
@@ -236,14 +287,14 @@ def main():
             log(f"ERROR: {str(e)[:120]}")
         time.sleep(2)
 
-def apply_job(url):
+def apply_job(url, expected_session_revision=None):
     apply_job.last_answers = {"phone": PROFILE_DATA["phone"], "address": PROFILE_DATA["address"],
                               "city": PROFILE_DATA["city"], "state": PROFILE_DATA["state"],
                               "pin": PROFILE_DATA["pin"], "college": PROFILE_DATA["college"],
                               "linkedin": PROFILE_DATA["linkedin"], "portfolio": PROFILE_DATA["portfolio"]}
     with sync_playwright() as p:
-        # Never reuse a possibly wedged persistent context. Cookies are loaded
-        # from li_state.json below, so each job can safely get a clean profile.
+        # Never reuse a possibly wedged persistent context. The pinned canonical
+        # revision is injected below, so every job gets a clean runtime profile.
         profile_dir = f"/tmp/li_w_{WORKER_ID}_{os.getpid()}"
         shutil.rmtree(profile_dir, ignore_errors=True)
         ctx = p.chromium.launch_persistent_context(
@@ -251,11 +302,14 @@ def apply_job(url):
             args=["--no-first-run", "--no-default-browser-check", "--disable-blink-features=AutomationControlled",
                   "--window-size=1400,900", "--remote-debugging-address=127.0.0.1",
                   f"--remote-debugging-port={CDP_PORT}"])
-        if os.path.exists(STATE):
-            try:
-                ctx.add_cookies(json.load(open(STATE)).get("cookies", []))
-            except Exception as e:
-                log(f"cookie inject fail: {str(e)[:80]}")
+        try:
+            session_revision = inject_current_session(
+                ctx, "linkedin", expected_revision=expected_session_revision
+            )
+            log(f"session revision {session_revision} pinned")
+        except PortalSessionUnavailable as exc:
+            ctx.close()
+            raise LinkedInAuthRequired("linkedin-session-required") from exc
         ctx.add_init_script(STEALTH)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         try:
@@ -271,7 +325,7 @@ def apply_job(url):
             if auth_required(page):
                 raise LinkedInAuthRequired("linkedin-session-required")
             txt = page.inner_text("body")
-            eligibility = jd_match.analyze(txt[:6000])
+            eligibility = jd_match.analyze(txt[:6000], approved_skills=PROFILE_DATA["stack"], approved_years=PROFILE_DATA["years"], blockers=False)
             if eligibility["decision"] == "skip":
                 return (False, "jd-" + eligibility["reason"])
             try:

@@ -42,6 +42,7 @@ hn_top_matches.md
 learned/agent_inbox/
 controlplane.db
 applications.db
+.private/
 *.previous
 *.pre-*
 .controlplane.key

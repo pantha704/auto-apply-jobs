@@ -43,6 +43,6 @@ def test_dry_run_uses_sqlite_backup_and_preserves_wal_rows(tmp_path):
     assert db.execute("SELECT id FROM jobs").fetchall() == [("wal-job",)]
     assert db.execute(
         "SELECT version FROM schema_migrations WHERE database_name='queue'"
-    ).fetchall() == [(1,), (2,)]
+    ).fetchall() == [(1,), (2,), (3,)]
     db.close()
     writer.close()

@@ -1,7 +1,9 @@
-import os, json, time, re
+import atexit, os, time, re, socket
 import urllib.parse as up
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 from playwright.sync_api import sync_playwright
+from workflow.portal_session_runtime import session_manager
+from workflow.portal_sessions import classify_probe
 
 CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
 HERE = "/home/ubuntu/job_hunt_linkedin"
@@ -23,9 +25,73 @@ def is_li_live(u):
     except Exception:
         return False
 
-def save_state(ctx):
-    json.dump({"cookies": ctx.cookies()}, open(os.path.join(HERE, "li_state.json"), "w"))
-    print("STATE SAVED", flush=True)
+MANAGER = session_manager()
+LEASE = MANAGER.acquire_renewal(
+    "linkedin", f"li-relogin:{socket.gethostname()}:{os.getpid()}", ttl_seconds=1800
+)
+_RELEASED = False
+
+
+def release_renewal():
+    global _RELEASED
+    if _RELEASED:
+        return
+    try:
+        MANAGER.release_renewal("linkedin", LEASE.token)
+    except Exception:
+        pass
+    _RELEASED = True
+
+
+atexit.register(release_renewal)
+
+
+def publish_state(ctx, playwright):
+    """Stage, independently probe, and atomically promote a LinkedIn candidate."""
+    state = ctx.storage_state()
+    candidate = MANAGER.stage_candidate("linkedin", state, LEASE.token)
+    probe_browser = probe_context = None
+    outcome, detail = "unknown", "probe-inconclusive"
+    try:
+        probe_browser = playwright.chromium.launch(
+            executable_path=CLOAK,
+            headless=True,
+            args=["--no-first-run", "--no-default-browser-check"],
+        )
+        probe_context = probe_browser.new_context(storage_state=state)
+        probe_page = probe_context.new_page()
+        probe_page.goto(
+            "https://www.linkedin.com/feed/",
+            wait_until="domcontentloaded",
+            timeout=45000,
+        )
+        try:
+            body = probe_page.inner_text("body")[:5000]
+        except Exception:
+            body = ""
+        outcome = classify_probe(probe_page.url, probe_page.title(), body)
+        if outcome == "valid" and "/feed" not in probe_page.url.lower():
+            outcome = "unknown"
+        detail = {
+            "valid": "authenticated-endpoint-accepted",
+            "expired": "authentication-required",
+            "challenged": "challenge-detected",
+            "unknown": "probe-inconclusive",
+        }[outcome]
+    except Exception:
+        outcome, detail = "unknown", "probe-network-error"
+    finally:
+        if probe_context is not None:
+            probe_context.close()
+        if probe_browser is not None:
+            probe_browser.close()
+    MANAGER.record_probe(
+        "linkedin", candidate.id, outcome, LEASE.token, detail
+    )
+    if outcome != "valid":
+        raise RuntimeError(f"candidate probe did not validate: {outcome}")
+    promoted = MANAGER.promote("linkedin", candidate.id, LEASE.token)
+    print(f"SESSION REVISION {promoted.revision} PROMOTED", flush=True)
 
 def click_continue(w):
     for label in CONTINUE_LABELS:
@@ -94,12 +160,12 @@ with sync_playwright() as p:
             def on_req(r):
                 if "gsi" in r.url and r.method == "POST":
                     captured["req"] = {"url": r.url, "body": r.post_data}
-                    print("CAPTURED POST REQ body:", (r.post_data or "")[:200], flush=True)
+                    print("CAPTURED POST REQ", flush=True)
             def on_resp(r):
                 if "gsi" in r.url and r.request.method == "POST":
                     try:
                         captured["resp"] = {"status": r.status, "body": r.text()[:3000]}
-                        print(f"CAPTURED POST RESP {r.status} len={len(captured['resp']['body'])}", flush=True)
+                        print(f"CAPTURED POST RESP {r.status}", flush=True)
                     except Exception as e:
                         print("resp read err:", str(e)[:60], flush=True)
             w.on("request", on_req)
@@ -113,7 +179,7 @@ with sync_playwright() as p:
     for step in range(90):
         if has_li_at(ctx) and not any(("checkpoint" in (w.url or "") or "challenge" in (w.url or "")) for w in ctx.pages):
             print("LI_AT CAPTURED", flush=True)
-            save_state(ctx)
+            publish_state(ctx, p)
             ctx.close(); break
         for w in ctx.pages:
             u = w.url or ""
@@ -280,7 +346,6 @@ with sync_playwright() as p:
                     txt = w.inner_text("body")
                     nums = re.findall(r"\b\d{2}\b", txt)
                     print("CHALLENGE NUMBERS:", nums[:6], flush=True)
-                    print("CHALLENGE TEXT:", txt[:400].replace("\n", " | "), flush=True)
                     w.screenshot(path="/tmp/challenge_live.png")
                     print("CHALLENGE SHOT SAVED", flush=True)
                 except Exception as e:
@@ -362,7 +427,7 @@ with sync_playwright() as p:
             u = w.url
             if is_li_live(u) and has_li_at(ctx):
                 print("LINKEDIN LIVE:", u[:110], flush=True)
-                save_state(ctx)
+                publish_state(ctx, p)
                 ctx.close(); raise SystemExit(0)
             if is_li_live(u) and not has_li_at(ctx):
                 print("LI page live but no li_at yet:", u[:100], flush=True)
