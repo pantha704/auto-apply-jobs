@@ -24,7 +24,7 @@ from title_filter import is_tech_title
 check("rejects fundraising", not is_tech_title("Fundraising Internship", "internshala"))
 check("rejects marketing", not is_tech_title("Marketing", "internshala"))
 check("rejects category page", not is_tech_title("Remote Sales Manager Jobs", "wellfound"))
-check("accepts marketplace (no false positive)", is_tech_title("Senior Full Stack Engineer II, Marketplace", "wellfound"))
+check("rejects senior roles for 1-YOE target", not is_tech_title("Senior Full Stack Engineer II, Marketplace", "wellfound"))
 check("accepts sales engineer", is_tech_title("Sales Engineer", "wellfound"))
 check("accepts dev roles", is_tech_title("Backend Developer", "linkedin"))
 

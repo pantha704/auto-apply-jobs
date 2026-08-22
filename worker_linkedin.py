@@ -2,19 +2,24 @@
 """Autonomous LinkedIn Easy-Apply worker. Claims jobs from SQLite queue atomically.
 Usage: python3 worker_linkedin.py <worker_id>
 """
-import json, os, re, sqlite3, sys, time
+import json, os, re, shutil, sqlite3, sys, time
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
-from playwright.sync_api import sync_playwright
 import audit
 import dynamic_ui
+import jd_match
+from title_filter import title_rejection_reason
 from worker_guard import BrowserWatchdog
 import profile as ident
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
 CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
 STATE = os.path.join(HERE, "li_state.json")
 RESUME = "/home/ubuntu/Documents/Pratham_Jaiswal_Updated_Resume.pdf"
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "li-w1"
+_worker_match = re.search(r"(\d+)$", WORKER_ID)
+CDP_PORT = int(os.environ.get("LI_CDP_PORT", str(9370 + (int(_worker_match.group(1)) if _worker_match else 1))))
+CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 STEALTH = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
 
 PROFILE_DATA = {
@@ -33,18 +38,23 @@ ONE_TOPICS = ["python", "typescript", "react", "node", "javascript", "database",
               "full stack", "frontend", "backend", "software", "development", "information technology", "it "]
 
 def db():
-    return sqlite3.connect(os.path.join(HERE, "apply_queue.db"))
+    return sqlite3.connect(DB)
 
 def claim(portal):
-    c = db()
-    row = c.execute("SELECT id, url, title FROM jobs WHERE portal=? AND status='pending' ORDER BY prio DESC, rowid LIMIT 1", (portal,)).fetchone()
-    if not row:
-        c.close(); return None
-    upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
-    c.commit(); c.close()
-    if upd.rowcount != 1:
-        return claim(portal)  # lost race, next
-    return {"id": row[0], "url": row[1], "title": row[2]}
+    while True:
+        c = db()
+        row = c.execute("SELECT id, url, title FROM jobs WHERE portal=? AND status='pending' ORDER BY prio DESC, rowid LIMIT 1", (portal,)).fetchone()
+        if not row:
+            c.close(); return None
+        reason = title_rejection_reason(row[2] or "", "linkedin")
+        if reason:
+            c.execute("UPDATE jobs SET status='skip', result=? WHERE id=? AND status='pending'", (reason, row[0]))
+            c.commit(); c.close()
+            continue
+        upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
+        c.commit(); c.close()
+        if upd.rowcount == 1:
+            return {"id": row[0], "url": row[1], "title": row[2]}
 
 def mark(jid, status, result=""):
     c = db()
@@ -53,6 +63,29 @@ def mark(jid, status, result=""):
 
 def log(msg):
     print(f"[{WORKER_ID}] {msg}", flush=True)
+
+
+def sync_playwright():
+    """Load Playwright only when a LinkedIn browser job actually runs."""
+    from playwright.sync_api import sync_playwright as _sync_playwright
+    return _sync_playwright()
+
+
+class LinkedInAuthRequired(Exception):
+    """Saved LinkedIn session is missing, revoked, or challenge-gated."""
+
+def auth_required(page):
+    current = (page.url or "").lower()
+    if any(x in current for x in ("/login", "/authwall", "/checkpoint", "/challenge", "/signup")):
+        return True
+    title = (page.title() or "").strip().lower()
+    if title in {"sign up | linkedin", "sign in | linkedin"}:
+        return True
+    body = page.inner_text("body")[:5000].lower()
+    return any(marker in body for marker in (
+        "sign in to linkedin", "join linkedin", "verify your identity",
+        "security verification", "new to linkedin? join now",
+    ))
 
 # ---------- JS helpers ----------
 def js_text(page, q, value):
@@ -164,6 +197,11 @@ def main():
         GUARD.start()
         try:
             ok = apply_job(job["url"])
+        except LinkedInAuthRequired:
+            mark(job["id"], "pending", "linkedin-session-required")
+            log("LINKEDIN SESSION REQUIRED — job requeued; stopping for session renewal")
+            GUARD.stop()
+            os._exit(12)
         except Exception as e:
             if GUARD.fired.is_set():
                 mark(job["id"], "pending", "browser-wedge-timeout")
@@ -196,10 +234,15 @@ def apply_job(url):
                               "pin": PROFILE_DATA["pin"], "college": PROFILE_DATA["college"],
                               "linkedin": PROFILE_DATA["linkedin"], "portfolio": PROFILE_DATA["portfolio"]}
     with sync_playwright() as p:
+        # Never reuse a possibly wedged persistent context. Cookies are loaded
+        # from li_state.json below, so each job can safely get a clean profile.
+        profile_dir = f"/tmp/li_w_{WORKER_ID}_{os.getpid()}"
+        shutil.rmtree(profile_dir, ignore_errors=True)
         ctx = p.chromium.launch_persistent_context(
-            user_data_dir=f"/tmp/li_w_{WORKER_ID}", executable_path=CLOAK, headless=True,
+            user_data_dir=profile_dir, executable_path=CLOAK, headless=True,
             args=["--no-first-run", "--no-default-browser-check", "--disable-blink-features=AutomationControlled",
-                  "--window-size=1400,900"])
+                  "--window-size=1400,900", "--remote-debugging-address=127.0.0.1",
+                  f"--remote-debugging-port={CDP_PORT}"])
         if os.path.exists(STATE):
             try:
                 ctx.add_cookies(json.load(open(STATE)).get("cookies", []))
@@ -217,7 +260,12 @@ def apply_job(url):
                         return (False, "goto-fail")
                     page.wait_for_timeout(4000)
             page.wait_for_timeout(2500)
+            if auth_required(page):
+                raise LinkedInAuthRequired("linkedin-session-required")
             txt = page.inner_text("body")
+            eligibility = jd_match.analyze(txt[:6000])
+            if eligibility["decision"] == "skip":
+                return (False, "jd-" + eligibility["reason"])
             try:
                 page.locator("button:has-text('Easy Apply')").first.wait_for(state="visible", timeout=12000)
                 is_easy = True
@@ -229,7 +277,10 @@ def apply_job(url):
                 return (False, "no-easy-apply")
 
             try:
-                if not dynamic_ui.click(page, "linkedin", "easy_apply", timeout_ms=12000):
+                if not dynamic_ui.hybrid_click(
+                    page, "linkedin", "easy_apply", CDP_URL,
+                    postcondition=lambda: page.locator("[role=dialog], .jobs-easy-apply-modal").count() > 0,
+                ):
                     return (False, "no-easy-apply")
                 page.wait_for_timeout(2000)
             except Exception:

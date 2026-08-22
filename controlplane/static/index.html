@@ -1,82 +1,153 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ApplyPilot Control Plane</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235e6ad2'/%3E%3Cpath d='M9 23 16 8l7 15-7-4z' fill='white'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
+<a class="skip-link" href="#content">Skip to content</a>
 <div class="shell">
-  <aside class="sidebar">
-    <div class="brand"><span class="mark">A</span><span>ApplyPilot</span></div>
-    <nav id="nav">
-      <button class="nav-item active" data-page="overview"><span>⌁</span>Overview</button>
-      <button class="nav-item" data-page="sites"><span>◎</span>Sites</button>
-      <button class="nav-item" data-page="onboarding"><span>◇</span>Onboarding</button>
-      <button class="nav-item" data-page="workers"><span>⌘</span>Workers</button>
-      <button class="nav-item" data-page="issues"><span>△</span>Issues <b id="issue-count" class="nav-count">0</b></button>
-      <button class="nav-item" data-page="history"><span>↻</span>History</button>
+  <aside class="sidebar" id="sidebar">
+    <div class="brand"><span class="mark" aria-hidden="true">A</span><span>ApplyPilot</span><button id="nav-close" class="icon-btn nav-close" aria-label="Close navigation">×</button></div>
+    <nav id="nav" aria-label="Primary navigation">
+      <p class="nav-label">Workspace</p>
+      <button class="nav-item active" data-page="overview"><span aria-hidden="true">⌁</span>Overview</button>
+      <button class="nav-item" data-page="analytics"><span aria-hidden="true">↗</span>Analytics</button>
+      <p class="nav-label">Onboarding</p>
+      <button class="nav-item" data-page="candidate"><span aria-hidden="true">◇</span>Candidate</button>
+      <button class="nav-item" data-page="resumes"><span aria-hidden="true">▤</span>Resumes</button>
+      <button class="nav-item" data-page="preferences"><span aria-hidden="true">⌘</span>Preferences</button>
+      <button class="nav-item" data-page="answers"><span aria-hidden="true">≡</span>Answer Bank</button>
+      <button class="nav-item" data-page="sites"><span aria-hidden="true">◎</span>Sites</button>
+      <button class="nav-item" data-page="sources"><span aria-hidden="true">⌕</span>External Sources</button>
+      <button class="nav-item" data-page="cold-email"><span aria-hidden="true">✉</span>Cold Email</button>
+      <p class="nav-label">Operations</p>
+      <button class="nav-item" data-page="reviews"><span aria-hidden="true">✓</span>Review Tasks <b id="review-count" class="nav-count hidden"></b></button>
+      <button class="nav-item" data-page="runs"><span aria-hidden="true">↻</span>Runs / Traces</button>
+      <button class="nav-item" data-page="history"><span aria-hidden="true">▣</span>History</button>
+      <button class="nav-item" data-page="issues"><span aria-hidden="true">⚠</span>Issues</button>
+      <button class="nav-item" data-page="readiness"><span aria-hidden="true">△</span>Readiness</button>
+      <button class="nav-item" data-page="workers"><span aria-hidden="true">◫</span>Workers</button>
     </nav>
-    <div class="sidebar-foot"><span class="pulse"></span><span id="connection-label">Connecting</span><small>Control plane</small></div>
+    <div class="sidebar-foot"><span class="pulse" id="connection-dot"></span><span id="connection-label">Connecting</span><small>Authenticated control plane</small></div>
   </aside>
+  <div class="scrim" id="scrim"></div>
+  <main id="content" tabindex="-1">
+    <header class="topbar">
+      <button id="mobile-menu" class="icon-btn" aria-label="Open navigation" aria-expanded="false">☰</button>
+      <div><p class="eyebrow" id="page-kicker">CONTROL PLANE</p><h1 id="page-title">Overview</h1></div>
+      <div class="top-actions"><span id="last-refresh" class="muted mono" aria-live="polite"></span><button class="btn" id="refresh">Refresh</button></div>
+    </header>
 
-  <main>
-    <header class="topbar"><button id="mobile-menu" class="icon-btn">☰</button><div><p class="eyebrow">AUTO-APPLY SYSTEM</p><h1 id="page-title">Overview</h1></div><div class="top-actions"><span id="last-refresh" class="muted mono"></span><button class="btn" id="refresh">Refresh</button><button class="btn primary" data-go="onboarding">Complete setup</button></div></header>
-
-    <section id="page-overview" class="page active">
-      <div id="readiness-banner" class="banner"></div>
-      <div class="metric-grid">
-        <article class="metric"><span>Confirmed applications</span><strong id="m-confirmed">—</strong><small id="m-last-submit">No data</small></article>
-        <article class="metric"><span>Pending jobs</span><strong id="m-pending">—</strong><small id="m-claimed">— claimed</small></article>
-        <article class="metric"><span>Active workers</span><strong id="m-workers">—</strong><small id="m-restarts">— restarts</small></article>
-        <article class="metric"><span>Readiness</span><strong id="m-readiness">—</strong><small id="m-sites">— sites configured</small></article>
-      </div>
+    <section id="page-overview" class="page active" aria-labelledby="page-title">
+      <div id="overview-banner" class="banner loading-state" role="status">Loading live readiness…</div>
+      <div id="overview-metrics" class="metric-grid" aria-live="polite"></div>
       <div class="split">
-        <article class="panel"><div class="panel-head"><div><h2>Queue by portal</h2><p>Live work distribution</p></div><span class="live-tag"><i></i>LIVE</span></div><div id="portal-bars" class="bar-list skeleton-block"></div></article>
-        <article class="panel"><div class="panel-head"><div><h2>Needs attention</h2><p>Blocking setup and operational issues</p></div><button class="link-btn" data-go="issues">View all</button></div><div id="overview-issues" class="issue-list skeleton-block"></div></article>
+        <article class="panel"><div class="panel-head"><div><h2>Application activity</h2><p>Confirmed outcomes from the connected data source</p></div></div><div id="overview-chart" class="chart-slot loading-state">Loading activity…</div></article>
+        <article class="panel"><div class="panel-head"><div><h2>Requires attention</h2><p>Current blockers and queued reviews</p></div></div><div id="overview-attention" class="loading-state">Loading issues…</div></article>
       </div>
-      <article class="panel"><div class="panel-head"><div><h2>Worker fleet</h2><p>Health, resource use, and restart history</p></div><button class="link-btn" data-go="workers">Manage</button></div><div id="worker-preview" class="table-wrap"></div></article>
+      <article class="panel"><div class="panel-head"><div><h2>Recent runs</h2><p>Latest workflow executions and outcomes</p></div><button class="link-btn" data-go="runs">View traces</button></div><div id="overview-runs" class="table-wrap loading-state">Loading runs…</div></article>
     </section>
 
-    <section id="page-sites" class="page">
-      <div class="section-actions"><div><h2>Application websites</h2><p>Add a career portal once. The system detects its ATS and checks login readiness.</p></div><button class="btn primary" id="add-site-open">+ Add website</button></div>
-      <div id="sites-grid" class="site-grid"></div>
-      <div id="site-form-card" class="panel form-panel hidden">
-        <div class="panel-head"><div><h2>Add a website</h2><p>Secrets are encrypted locally and never returned by the API.</p></div><button class="icon-btn" id="add-site-close">×</button></div>
-        <form id="site-form" class="form-grid">
-          <label><span>Display name</span><input name="name" required minlength="2" placeholder="Acme Careers"></label>
-          <label><span>Jobs URL</span><input name="base_url" required type="url" placeholder="https://careers.example.com/jobs"></label>
-          <label><span>Adapter</span><select name="adapter"><option value="auto">Auto-detect</option><option>greenhouse</option><option>lever</option><option>ashby</option><option>workday</option><option>smartrecruiters</option><option>generic</option><option>linkedin</option><option>wellfound</option></select></label>
-          <label><span>Authentication</span><select name="auth_type" id="auth-type"><option value="none">No login</option><option value="password">Username + password</option><option value="session">Existing browser session</option></select></label>
-          <label class="auth-password hidden"><span>Username / email</span><input name="username" autocomplete="username"></label>
-          <label class="auth-password hidden"><span>Password</span><input name="password" type="password" autocomplete="new-password"></label>
-          <label class="auth-session hidden wide"><span>Session profile reference</span><input name="session_ref" placeholder="profiles/acme"></label>
-          <div class="wide form-actions"><button type="button" class="btn" id="site-cancel">Cancel</button><button class="btn primary">Save and validate</button></div>
-        </form><p id="site-form-error" class="form-error"></p>
+    <section id="page-analytics" class="page">
+      <div class="section-actions"><div><h2>Application analytics</h2><p>API-backed trends only; unavailable periods are never estimated.</p></div></div>
+      <div class="range-toolbar" role="group" aria-label="Analytics date range">
+        <div id="range-presets" class="segmented"> <button data-range="24h">24h</button><button class="active" data-range="7d">7d</button><button data-range="1m">1m</button><button data-range="3m">3m</button><button data-range="6m">6m</button><button data-range="1y">1y</button><button data-range="all">All</button><button data-range="custom">Custom</button></div>
+        <form id="custom-range" class="date-range hidden"><label>From <input id="range-start" type="date" required></label><label>To <input id="range-end" type="date" required></label><button class="btn" type="submit">Apply</button></form>
       </div>
+      <div id="analytics-metrics" class="metric-grid"></div>
+      <div class="split charts"><article class="panel"><div class="panel-head"><div><h2>Applications over time</h2><p>Volume by API interval</p></div></div><div id="applications-chart" class="chart-slot loading-state">Loading analytics…</div></article><article class="panel"><div class="panel-head"><div><h2>Outcome mix</h2><p>Status distribution</p></div></div><div id="outcomes-chart" class="chart-slot loading-state">Loading analytics…</div></article></div>
+      <article class="panel"><div class="panel-head"><div><h2>Source performance</h2><p>Observed results grouped by source</p></div></div><div id="analytics-table" class="table-wrap loading-state">Loading analytics…</div></article>
     </section>
 
-    <section id="page-onboarding" class="page">
-      <div class="onboarding-head"><div><p class="eyebrow">GUIDED SETUP</p><h2>Tell the system what it may use</h2><p>We flag missing fields before a worker reaches an application form. Unknown answers are never invented.</p></div><div id="profile-progress" class="progress-ring">0%</div></div>
-      <div class="onboarding-layout">
-        <form id="profile-form" class="panel form-grid">
-          <label><span>Full name</span><input name="full_name" required></label><label><span>Email</span><input name="email" type="email" required></label>
-          <label><span>Phone</span><input name="phone" required></label><label><span>City</span><input name="city" required></label>
-          <label><span>Country</span><input name="country" required value="India"></label><label><span>Years of experience</span><input name="years_experience" type="number" min="0" max="60" step="0.5" required></label>
-          <label><span>Work authorization</span><input name="work_authorization" required placeholder="India"></label><label><span>Sponsorship required</span><select name="sponsorship_required"><option value="true">Yes</option><option value="false">No</option></select></label>
-          <div class="wide privacy-note">🔒 Profile values are encrypted at rest. Status APIs expose completeness only.</div>
-          <div class="wide form-actions"><button class="btn primary">Save applicant profile</button></div>
+    <section id="page-candidate" class="page data-page"><div class="section-actions"><div><h2>Candidate profile</h2><p>Completeness and safe metadata. Stored personal values are not displayed.</p></div></div><div id="candidate-content" class="panel loading-state">Loading candidate status…</div></section>
+    <section id="page-resumes" class="page data-page"><div class="section-actions"><div><h2>Resumes</h2><p>Manage résumé metadata and active document selection.</p></div></div><div id="resumes-content" class="panel loading-state">Loading resumes…</div></section>
+    <section id="page-preferences" class="page data-page"><div class="section-actions"><div><h2>Preferences</h2><p>Search and application policy configuration.</p></div></div><div id="preferences-content" class="panel loading-state">Loading preferences…</div></section>
+    <section id="page-answers" class="page data-page"><div class="section-actions"><div><h2>Answer Bank</h2><p>Question coverage and review status. Raw stored answers are never rendered.</p></div></div><div id="answers-content" class="panel loading-state">Loading answer bank metadata…</div></section>
+    <section id="page-sites" class="page data-page"><div class="section-actions"><div><h2>Sites</h2><p>Connected job sources, adapters, and authentication readiness.</p></div></div>
+      <form id="site-form" class="workflow-form">
+        <div class="panel-head"><div><h2>Add site</h2><p>Credentials stay encrypted. Values are never shown after save.</p></div></div>
+        <div class="form-grid">
+          <label><span>Name</span><input name="name" required></label>
+          <label><span>Base URL</span><input name="base_url" type="url" required placeholder="https://careers.example.com"></label>
+          <label><span>Auth type</span><select name="auth_type"><option value="none">none</option><option value="password">password</option><option value="session">session</option></select></label>
+          <label><span>Adapter</span><input name="adapter" value="auto"></label>
+          <label><span>Username (optional)</span><input name="username" autocomplete="off"></label>
+          <label><span>Password (optional)</span><input name="password" type="password" autocomplete="new-password"></label>
+        </div>
+        <button class="btn primary" type="submit">Add site</button>
+      </form>
+      <div id="sites-content" class="panel loading-state">Loading sites…</div>
+    </section>
+    <section id="page-sources" class="page data-page">
+      <div class="section-actions"><div><h2>External Sources</h2><p>Bring random company lists, career URLs, CSVs, JSON, and sheets into one reviewable lane.</p></div><span class="live-tag"><i></i>NO AUTO-SEND</span></div>
+      <article class="panel architecture-panel" aria-label="Job discovery and application architecture">
+        <div class="panel-head"><div><h2>Decision architecture</h2><p>Deterministic first; agent recovery only when a known recipe cannot proceed.</p></div></div>
+        <div class="flow-strip">
+          <div class="flow-node external"><b>Collect</b><span>URLs · CSV · Sheets · manual</span></div><i>→</i>
+          <div class="flow-node backend"><b>Normalize + classify</b><span>Apply · watchlist · email · review</span></div><i>→</i>
+          <div class="flow-stack"><div class="flow-node browser"><b>Cloak + Playwright</b><span>Known portals and recipes</span></div><div class="flow-node recovery"><b>Browser Use recovery</b><span>Unknown/drift → human review</span></div></div><i>→</i>
+          <div class="flow-node verify"><b>Verify + record</b><span>Only proof increments applications</span></div>
+        </div>
+      </article>
+      <form id="source-form" class="workflow-form">
+        <div class="panel-head"><div><h2>Add source</h2><p>Register it now. Fetch automation remains disabled until these manual lanes are proven.</p></div></div>
+        <div class="form-grid">
+          <label><span>Name</span><input name="name" required placeholder="Startup directory"></label>
+          <label><span>Type</span><select name="kind"><option value="manual">manual</option><option value="sheet">Google Sheet</option><option value="csv">CSV</option><option value="html">web page</option><option value="json">JSON</option></select></label>
+          <label class="wide"><span>URL or manual identifier</span><input name="url" required placeholder="https://… or manual://companies"></label>
+          <label><span>Category (optional)</span><input name="category" placeholder="India startups"></label>
+        </div>
+        <button class="btn primary" type="submit">Add external source</button>
+      </form>
+      <div id="sources-content" class="panel loading-state">Loading external sources…</div>
+    </section>
+    <section id="page-cold-email" class="page data-page">
+      <div class="section-actions"><div><h2>Cold Email</h2><p>Prepare one company at a time, edit it, open Gmail, then record only what you actually sent.</p></div><span class="manual-tag">Manual send only</span></div>
+      <div id="cold-email-metrics" class="metric-grid"></div>
+      <div class="split">
+        <form id="cold-contact-form" class="workflow-form">
+          <div class="panel-head"><div><h2>Add company contact</h2><p>No mail is sent when you save a contact.</p></div></div>
+          <div class="form-grid">
+            <label><span>Company</span><input name="company" required></label>
+            <label><span>Company email</span><input name="email" type="email" required></label>
+            <label><span>Role</span><input name="role" placeholder="Full Stack Developer"></label>
+            <label><span>Website</span><input name="website" type="url"></label>
+            <label class="wide"><span>Source</span><select name="source_id" id="cold-source-select"><option value="">No source</option></select></label>
+          </div>
+          <button class="btn primary" type="submit">Add to email queue</button>
         </form>
-        <aside><article class="panel"><h3>Readiness checklist</h3><div id="readiness-list" class="check-list"></div></article><article class="panel tip"><h3>Operating principle</h3><p>A job is marked submitted only after confirmation evidence. Missing or unfamiliar questions pause for review.</p></article></aside>
-      </div>
-    </section>
+        <form id="cold-template-form" class="workflow-form">
+          <div class="panel-head"><div><h2>Email template</h2><p>Use {{company}}, {{role}}, {{website}}, and {{email}}. You can edit every draft.</p></div></div>
+          <div class="form-grid">
+            <label><span>Name</span><input name="name" required value="Direct introduction"></label>
+            <label><span>Default</span><select name="is_default"><option value="true">yes</option><option value="false">no</option></select></label>
+            <label class="wide"><span>Subject</span><input name="subject" required value="Application for {{role}} at {{company}}"></label>
+            <label class="wide"><span>Body</span><textarea name="body" rows="8" required>Hello {{company}} team,
 
-    <section id="page-workers" class="page"><div class="section-actions"><div><h2>Worker fleet</h2><p>Live systemd state, resource use, restarts, and controls.</p></div><span class="live-tag"><i></i>LIVE</span></div><div id="workers-table" class="panel table-wrap"></div></section>
-    <section id="page-issues" class="page"><div class="section-actions"><div><h2>Issues and remediation</h2><p>Setup blockers and grouped operational failure patterns.</p></div></div><div id="blocking-issues" class="issue-list"></div><article class="panel"><div class="panel-head"><div><h2>Operational patterns</h2><p>Grouped skips from the live queue</p></div></div><div id="operational-table" class="table-wrap"></div></article></section>
-    <section id="page-history" class="page"><div class="section-actions"><div><h2>Application history</h2><p>Audited outcomes; sensitive answer payloads are excluded.</p></div><div><select id="history-status"><option value="">All statuses</option><option value="submitted">Confirmed submitted</option><option value="applied">Applied</option><option value="submitted-unconfirmed">Unconfirmed</option></select></div></div><div id="history-table" class="panel table-wrap"></div></section>
+I'm Pratham, a full-stack developer with experience in TypeScript, React, Node.js, and Python. I'm interested in the {{role}} opportunity and would be glad to share how I can contribute.
+
+Regards,
+Pratham Jaiswal</textarea></label>
+          </div>
+          <button class="btn primary" type="submit">Save template</button>
+        </form>
+      </div>
+      <div id="cold-draft-editor" class="panel hidden" aria-live="polite"></div>
+      <div id="cold-email-content" class="panel loading-state">Loading cold-email queue…</div>
+    </section>
+    <section id="page-reviews" class="page data-page"><div class="section-actions"><div><h2>Review tasks</h2><p>Human decisions requested by automation. Sensitive answer payloads are hidden.</p></div></div><div id="reviews-content" class="panel loading-state">Loading review queue…</div></section>
+    <section id="page-runs" class="page data-page"><div class="section-actions"><div><h2>Runs / Traces</h2><p>Workflow execution history with inspectable, sanitized trace events.</p></div></div><div id="runs-content" class="panel loading-state">Loading runs…</div><div id="trace-content" class="panel hidden" aria-live="polite"></div></section>
+    <section id="page-history" class="page data-page"><div class="section-actions"><div><h2>History</h2><p>Confirmed and recorded applications. Answers and snapshots are never shown.</p></div></div><div id="history-content" class="panel loading-state">Loading applications…</div></section>
+    <section id="page-issues" class="page data-page"><div class="section-actions"><div><h2>Issues</h2><p>Blocking readiness checks and operational skip reasons from live data.</p></div></div><div id="issues-content" class="panel loading-state">Loading issues…</div></section>
+    <section id="page-readiness" class="page data-page"><div class="section-actions"><div><h2>Readiness</h2><p>Checks that must pass before unattended applications can run.</p></div></div><div id="readiness-content" class="panel loading-state">Loading readiness…</div></section>
+    <section id="page-workers" class="page data-page"><div class="section-actions"><div><h2>Workers</h2><p>Live fleet state, resource use, and restart history.</p></div><span class="live-tag"><i></i>LIVE</span></div><div id="workers-content" class="panel loading-state">Loading workers…</div></section>
   </main>
 </div>
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="/static/app.js"></script>
-</body></html>
+</body>
+</html>

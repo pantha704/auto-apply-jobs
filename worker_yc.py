@@ -18,7 +18,9 @@ from playwright.sync_api import sync_playwright
 import audit
 import dynamic_ui
 import jd_match
-from title_filter import is_tech_title
+from job_identity import stable_job_id
+from submission_signals import has_submission_confirmation
+from title_filter import title_rejection_reason
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
@@ -26,6 +28,9 @@ PROFILE = os.path.join(HERE, "profiles", "yc_cap")
 STATE = os.path.join(HERE, "portal_yc.json")
 RESUME = "/home/ubuntu/Documents/Pratham_Jaiswal_Updated_Resume.pdf"
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "yc-w1"
+_worker_match = re.search(r"(\d+)$", WORKER_ID)
+CDP_PORT = int(os.environ.get("YC_CDP_PORT", str(9360 + (int(_worker_match.group(1)) if _worker_match else 1))))
+CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 STEALTH = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
 
 RUNNING = True
@@ -70,7 +75,7 @@ def expand_company(page, job):
     c = db()
     added = 0
     for l in links:
-        jid = f"yc-{abs(hash(l))}"
+        jid = stable_job_id("yc", l)
         ttl = re.sub(r"^.*?/jobs/", "", l)
         cur = c.execute("SELECT id FROM jobs WHERE id=? OR url=?", (jid, l)).fetchone()
         if cur:
@@ -106,11 +111,15 @@ def apply_job(page, job):
         h1 = page.inner_text("h1")[:120]
     except Exception:
         pass
-    if h1 and not is_tech_title(h1, "yc"):
-        return ("skip", "non-tech-title", "")
+    title_reason = title_rejection_reason(h1, "yc-job")
+    if title_reason:
+        return ("skip", title_reason, "")
 
     # Intent-first apply navigation; no model fallback is allowed to send.
-    if not dynamic_ui.click(page, "yc", "apply", timeout_ms=8000):
+    if not dynamic_ui.hybrid_click(
+        page, "yc", "apply", CDP_URL,
+        postcondition=lambda: page.locator("textarea, [role=dialog]").count() > 0,
+    ):
         return ("skip", "no-apply-button", "")
 
     # wait for the message modal
@@ -134,20 +143,30 @@ def apply_job(page, job):
     except Exception as e:
         return ("skip", f"fill-err:{str(e)[:60]}", "")
 
+    # Capture application-scoped mutation responses before Send.
+    submit_http = []
+    try:
+        def _on_resp(r):
+            try:
+                if r.request.method in ("POST", "PUT") and re.search(r"application|apply|send|candidate", r.url):
+                    submit_http.append(r.status)
+            except Exception:
+                pass
+        page.on("response", _on_resp)
+    except Exception:
+        pass
     # Send
     if not dynamic_ui.click(page, "yc", "send", timeout_ms=5000):
         return ("skip", "no-send-button", "")
-    sent = True
 
     page.wait_for_timeout(4000)
-    # modal should be gone / success text
     try:
-        after = page.inner_text("body")[:600]
-        if "Send" in after and "textarea" in str(page.query_selector("textarea") or ""):
-            return ("skip", "send-unconfirmed", "")
+        after = page.inner_text("body")[:3000]
+        if has_submission_confirmation(after, submit_http):
+            return ("submitted", "sent", note)
     except Exception:
         pass
-    return ("submitted", "sent", note)
+    return ("skip", "send-unconfirmed", "")
 
 def apply_url(url):
     """Standalone apply attempt for one YC URL (used by the reviewer worker).
@@ -157,7 +176,8 @@ def apply_url(url):
             ctx = p.chromium.launch_persistent_context(
                 user_data_dir=PROFILE, executable_path=CLOAK, headless=True,
                 args=["--no-first-run", "--no-default-browser-check",
-                      "--disable-blink-features=AutomationControlled", "--window-size=1400,900"])
+                      "--disable-blink-features=AutomationControlled", "--window-size=1400,900",
+                      "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={CDP_PORT}"])
             if os.path.exists(STATE):
                 try:
                     ctx.add_cookies(json.load(open(STATE)).get("cookies", []))
@@ -186,7 +206,8 @@ def handle(job):
             ctx = p.chromium.launch_persistent_context(
                 user_data_dir=PROFILE, executable_path=CLOAK, headless=True,
                 args=["--no-first-run", "--no-default-browser-check",
-                      "--disable-blink-features=AutomationControlled", "--window-size=1400,900"])
+                      "--disable-blink-features=AutomationControlled", "--window-size=1400,900",
+                      "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={CDP_PORT}"])
             # fallback: inject banked session cookies too
             if os.path.exists(STATE):
                 try:

@@ -8,30 +8,45 @@ Usage: python3 worker_external.py <worker_id>
 """
 import json, os, re, sqlite3, sys, time, signal
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
-from playwright.sync_api import sync_playwright
 from worker_guard import BrowserWatchdog
 import dynamic_ui
+from title_filter import title_rejection_reason
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "ext-w1"
+_worker_match = re.search(r"(\d+)$", WORKER_ID)
+CDP_PORT = int(os.environ.get("EXT_CDP_PORT", str(9380 + (int(_worker_match.group(1)) if _worker_match else 1))))
+CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 
 def log(msg):
     print(f"[{WORKER_ID}] [{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
+def sync_playwright():
+    """Load Playwright only when an external browser job actually runs."""
+    from playwright.sync_api import sync_playwright as _sync_playwright
+    return _sync_playwright()
+
 def db():
-    return sqlite3.connect(os.path.join(HERE, "apply_queue.db"))
+    return sqlite3.connect(os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db")))
 
 def claim():
-    c = db()
-    row = c.execute("SELECT id, url, title, source FROM jobs WHERE portal='external' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
-    if not row:
-        c.close(); return None
-    upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
-    c.commit(); c.close()
-    if upd.rowcount != 1:
-        return claim()
-    return {"id": row[0], "url": row[1], "title": row[2], "source": row[3]}
+    while True:
+        c = db()
+        row = c.execute("SELECT id, url, title, source FROM jobs WHERE portal='external' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
+        if not row:
+            c.close(); return None
+        source = (row[3] or "").lower()
+        gate_source = "yc-job" if source == "yc" and "/jobs/" in (row[1] or "") else source
+        reason = title_rejection_reason(row[2] or "", gate_source)
+        if reason:
+            c.execute("UPDATE jobs SET status='skip', result=? WHERE id=? AND status='pending'", (reason, row[0]))
+            c.commit(); c.close()
+            continue
+        upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
+        c.commit(); c.close()
+        if upd.rowcount == 1:
+            return {"id": row[0], "url": row[1], "title": row[2], "source": row[3]}
 
 def mark(jid, status, result=""):
     c = db()
@@ -100,7 +115,8 @@ def himalayas_apply(url):
             ctx = p.chromium.launch_persistent_context(
                 user_data_dir=HIMA_PROF, executable_path=CLOAK, headless=True,
                 args=["--no-first-run", "--no-default-browser-check", "--disable-blink-features=AutomationControlled",
-                      "--window-size=1280,720"])
+                      "--window-size=1280,720", "--remote-debugging-address=127.0.0.1",
+                      f"--remote-debugging-port={CDP_PORT}"])
             if usable:
                 try:
                     ctx.add_cookies(usable)
@@ -146,7 +162,10 @@ def himalayas_apply(url):
                 ctx.close()
                 return (False, "job-expired")
             # Intent-first entry into the Himalayas application flow.
-            if not dynamic_ui.click(page, "himalayas", "apply", timeout_ms=5000):
+            if not dynamic_ui.hybrid_click(
+                page, "himalayas", "apply", CDP_URL,
+                postcondition=lambda: page.locator("form, textarea, input[type=file]").count() > 0 or page.url != url,
+            ):
                 ctx.close()
                 return (False, "no-apply-btn")
             page.wait_for_timeout(7000)

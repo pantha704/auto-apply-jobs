@@ -1,0 +1,47 @@
+[
+  {
+    "name": "Remotive 900+ remote startups",
+    "kind": "discovery_resource",
+    "category": "remote_startups",
+    "url": "https://docs.google.com/spreadsheets/d/1TLJSlNxCbwRNxy14Toe1PYwbCTY7h0CNHeer9J0VRzE/edit?usp=drivesdk",
+    "source_short_url": "https://t.co/P2AZ3BHQSR",
+    "scope": "Worldwide remote startup/company directory; extract career pages, then apply normal India/worldwide eligibility filters.",
+    "status": "queued_for_discovery"
+  },
+  {
+    "name": "Lets Code 100% remote hiring companies",
+    "kind": "discovery_resource",
+    "category": "remote_companies",
+    "url": "https://docs.google.com/spreadsheets/d/1CLTL5PoQ99tbxQ5qbj2ScxqbzS0ASr0Qm0b1wjOot9I/edit?usp=drivesdk",
+    "source_short_url": "https://t.co/Atf3G5Q3IY",
+    "scope": "Remote company directory with website, LinkedIn and industry fields; validate hiring pages and hiring geography.",
+    "status": "queued_for_discovery"
+  },
+  {
+    "name": "Remote Job Seeker's Resource Hub",
+    "kind": "discovery_resource",
+    "category": "job_boards_and_companies",
+    "url": "https://docs.google.com/spreadsheets/d/1DOlqcLGoRFdhFoaRsBZs2DgEjjjQlzSV/edit?usp=drivesdk&ouid=110057504333352014722&rtpof=true&sd=true",
+    "source_short_url": "https://t.co/auBXgAy23s",
+    "scope": "Workbook containing remote job boards, niche boards, remote-first companies and career resources.",
+    "status": "queued_for_discovery"
+  },
+  {
+    "name": "India Remote Startups Database",
+    "kind": "discovery_resource",
+    "category": "india_remote_startups",
+    "url": "https://docs.google.com/spreadsheets/d/1MEyLhVPCGrT0dIZ4MVyaWQIYjBjoN0NP/edit?usp=drivesdk&ouid=110057504333352014722&rtpof=true&sd=true",
+    "source_short_url": "https://t.co/tocFc3aR31",
+    "scope": "India-focused remote startup directory with typical tech roles and careers pages; highest-priority discovery source.",
+    "status": "queued_for_discovery"
+  },
+  {
+    "name": "Remotive 150+ remote startups",
+    "kind": "discovery_resource",
+    "category": "remote_startups",
+    "url": "https://docs.google.com/spreadsheets/d/18bljq3y5YTxPLmA4xj10EaKxs1KWhIdLTr8bF1K5XKI/edit?usp=drivesdk",
+    "source_short_url": "https://t.co/rGbYN6x48Y",
+    "scope": "Remote startup/company directory with career-page links and listed open-role counts; verify current listings.",
+    "status": "queued_for_discovery"
+  }
+]

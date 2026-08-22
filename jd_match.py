@@ -45,9 +45,30 @@ BLOCKERS = [
     (r"does not (offer|provide) visa sponsorship", "no-sponsorship"),
     (r"no visa sponsorship", "no-sponsorship"),
     (r"requires all remote workers to be in-country", "no-sponsorship"),
+    (r"(?:visa|immigration|employment) sponsorship (?:is )?(?:not available|unavailable|not offered|not provided)", "no-sponsorship"),
+    (r"(?:unable|not able) to (?:offer|provide|support) (?:visa |immigration )?sponsorship", "no-sponsorship"),
+    (r"(?:do|will) not (?:offer |provide )?(?:visa |immigration )?sponsor(?:ship)?", "no-sponsorship"),
+    (r"(?:must|need to) (?:be able to )?work (?:in the u\.?s\.? )?without (?:current or future )?(?:visa )?sponsorship", "no-sponsorship"),
+    (r"(?:remote (?:only )?(?:within|in) (?:the )?(?:united states|u\.?s\.?))|(?:(?:united states|u\.?s\.?) only)", "us-location-only"),
+    (r"(?:must|required to) (?:be |currently )?(?:located|based|reside|living) in (?:the )?(?:united states|u\.?s\.?)", "us-location-only"),
 ]
 
 SENIOR_PAT = re.compile(r"(5\+?\s*(?:yrs?|years|years of experience)|8\+?\s*(?:yrs?|years))", re.I)
+
+
+def minimum_required_experience(text):
+    """Extract an explicit minimum years requirement; ignore company-age prose."""
+    t = (text or "").replace("–", "-").replace("—", "-")
+    values = []
+    patterns = [
+        r"\b(\d{1,2})\s*\+\s*(?:years?|yrs?)(?:\s+of)?\s+(?:professional\s+|relevant\s+|work\s+|industry\s+)?experience",
+        r"\b(?:at least|minimum(?: of)?|minimum experience(?: of)?|requires?)\s*(\d{1,2})\s*(?:years?|yrs?)(?:\s+of)?\s+(?:professional\s+|relevant\s+|work\s+|industry\s+)?experience",
+        r"\b(\d{1,2})\s*(?:-|to)\s*\d{1,2}\s*(?:years?|yrs?)(?:\s+of)?\s+(?:professional\s+|relevant\s+|work\s+|industry\s+)?experience",
+        r"\b(\d{1,2})\s*(?:years?|yrs?)\s+of\s+(?:professional\s+|relevant\s+|software\s+|engineering\s+|industry\s+|work\s+)?experience",
+    ]
+    for pattern in patterns:
+        values.extend(int(m.group(1)) for m in re.finditer(pattern, t, re.I))
+    return min(values) if values else None
 
 # canonical display names (dedup node/node.js, postgres/postgresql, next.js/nextjs)
 CANON = {"node": "node.js", "nextjs": "next.js", "postgres": "postgresql"}
@@ -70,6 +91,11 @@ def analyze(jd_text):
     for pat, why in BLOCKERS:
         if re.search(pat, tl):
             return {"decision": "skip", "reason": why, "matched": [], "gaps": [], "note": "", "senior": False}
+    minimum_years = minimum_required_experience(t)
+    if minimum_years is not None and minimum_years >= 3:
+        return {"decision": "skip", "reason": "experience-required",
+                "matched": [], "gaps": [], "note": "", "senior": True,
+                "minimum_years": minimum_years}
     found = extract_skills(t)
     matched = sorted(set(found))
     gaps = sorted({s for s in ("go", "java", "aws", "kubernetes", "graphql", "terraform")

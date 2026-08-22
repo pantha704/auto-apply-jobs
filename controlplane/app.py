@@ -4,18 +4,21 @@ import asyncio
 import base64
 import binascii
 import importlib.util
+import hashlib
+import hmac
 import json
 import logging
 import os
 import secrets
 import sqlite3
 import subprocess
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
-from urllib.parse import urlparse
+from typing import Any, Literal
+from urllib.parse import urlencode, urlparse
 
 import psutil
 from cryptography.fernet import Fernet
@@ -23,6 +26,9 @@ from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from discovery.ingest import apply_batch
+from workflow.schema import migrate_control
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = Path(__file__).resolve().parent / "static"
@@ -56,6 +62,7 @@ class Settings(BaseModel):
     control_db: Path
     vault_key: Path
     resume: Path
+    resume_storage: Path
     auth_disabled: bool
     username: str
     password: str
@@ -68,6 +75,7 @@ def settings() -> Settings:
         control_db=Path(os.getenv("JOBHUNT_CONTROL_DB", ROOT / "controlplane.db")),
         vault_key=Path(os.getenv("JOBHUNT_VAULT_KEY", ROOT / ".controlplane.key")),
         resume=Path(os.getenv("JOBHUNT_RESUME", ROOT / "resume.pdf")),
+        resume_storage=Path(os.getenv("JOBHUNT_RESUME_STORAGE", ROOT / ".private" / "resumes")),
         auth_disabled=os.getenv("JOBHUNT_DASHBOARD_AUTH_DISABLED", "0") == "1",
         username=os.getenv("JOBHUNT_DASHBOARD_USER", ""),
         password=os.getenv("JOBHUNT_DASHBOARD_PASSWORD", ""),
@@ -90,6 +98,13 @@ def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
 
 def initialize() -> None:
     cfg = settings()
+    legacy_control = cfg.control_db.is_file()
+    if legacy_control:
+        with sqlite3.connect(cfg.control_db) as probe:
+            existing = {row[0] for row in probe.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        legacy_control = bool(existing & {"sites", "profile_fields"}) and not (
+            {"external_sources", "control_flags"} <= existing
+        )
     with connect(cfg.control_db) as db:
         db.executescript("""
         CREATE TABLE IF NOT EXISTS sites (
@@ -132,6 +147,8 @@ def initialize() -> None:
         CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_samples_unit_time ON worker_samples(unit, sampled_at DESC);
         """)
+    if not legacy_control:
+        migrate_control(cfg.control_db)
     _vault()
     bootstrap_existing_profile()
     bootstrap_existing_sites()
@@ -397,6 +414,26 @@ def authorized(request: Request) -> bool:
     )
 
 
+def _flag(key: str) -> str | None:
+    try:
+        with connect(settings().control_db, readonly=True) as db:
+            row = db.execute(
+                "SELECT value FROM control_flags WHERE key=?", (key,)
+            ).fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
+def _ingest_token_valid(request: Request) -> bool:
+    raw = request.headers.get("x-jobhunt-ingest") or ""
+    stored = _flag("ingest_token_sha256")
+    if not raw or not stored:
+        return False
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    return hmac.compare_digest(digest, stored)
+
+
 async def telemetry_loop() -> None:
     while True:
         try:
@@ -432,6 +469,8 @@ async def authentication(request: Request, call_next):
         return response
 
     if request.url.path in {"/livez", "/readyz"}:
+        return secured(await call_next(request))
+    if request.url.path.startswith("/api/ingest/") and _ingest_token_valid(request):
         return secured(await call_next(request))
     cfg = settings()
     if not cfg.auth_disabled and (not cfg.username or not cfg.password):
@@ -552,6 +591,7 @@ def application_summary() -> dict:
 
 
 @app.get("/api/overview")
+@app.get("/api/workflow/overview")
 def overview() -> dict:
     queue = queue_summary()
     apps = application_summary()
@@ -608,6 +648,7 @@ def site_public(row: sqlite3.Row) -> dict:
 
 
 @app.get("/api/sites")
+@app.get("/api/workflow/sites")
 def list_sites() -> list[dict]:
     with connect(settings().control_db, readonly=True) as db:
         return [
@@ -862,6 +903,7 @@ def worker_status() -> list[dict]:
 
 
 @app.get("/api/workers")
+@app.get("/api/workflow/workers")
 def workers() -> list[dict]:
     return worker_status()
 
@@ -947,6 +989,273 @@ def issues() -> dict:
     return {"blocking": data["issues"], "operational": operational}
 
 
+class IngestBatchInput(BaseModel):
+    source_id: str = Field(min_length=1, max_length=80)
+    entities: list[dict[str, Any]] = Field(default_factory=list)
+    fetched_at: str | None = None
+
+
+class ExternalSourceInput(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    url: str = Field(min_length=1, max_length=2000)
+    kind: Literal["sheet", "csv", "html", "json", "manual"] = "manual"
+    category: str | None = Field(default=None, max_length=120)
+    owner: Literal["n8n", "api"] = "api"
+
+
+class ColdContactInput(BaseModel):
+    company: str = Field(min_length=1, max_length=200)
+    email: str = Field(min_length=3, max_length=320)
+    website: str | None = Field(default=None, max_length=2000)
+    role: str | None = Field(default=None, max_length=300)
+    requirements: str | None = Field(default=None, max_length=4000)
+    source_id: str | None = Field(default=None, max_length=80)
+
+
+class ColdTemplateInput(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    subject: str = Field(min_length=1, max_length=300)
+    body: str = Field(min_length=1, max_length=10000)
+    is_default: bool = False
+
+
+class ColdDraftInput(BaseModel):
+    template_id: str | None = Field(default=None, max_length=80)
+    subject: str | None = Field(default=None, max_length=300)
+    body: str | None = Field(default=None, max_length=10000)
+
+
+class ColdMarkSentInput(BaseModel):
+    confirmed: bool = False
+    provider_id: str = Field(default="gmail-manual", max_length=80)
+
+
+def _valid_contact_email(value: str) -> bool:
+    local, separator, domain = value.strip().lower().partition("@")
+    return bool(separator and local and "." in domain and not any(ch.isspace() for ch in value))
+
+
+def _render_cold_template(value: str, contact: sqlite3.Row) -> str:
+    rendered = value
+    fields = {
+        "company": contact["company"] or "",
+        "role": contact["role"] or "",
+        "website": contact["website"] or "",
+        "email": contact["email"] or "",
+    }
+    for key, replacement in fields.items():
+        rendered = rendered.replace("{{" + key + "}}", str(replacement))
+    return rendered
+
+
+@app.get("/api/external-sources")
+def external_sources() -> dict:
+    with connect(settings().control_db, readonly=True) as db:
+        rows = db.execute(
+            """SELECT s.id,s.name,s.url,s.kind,s.category,s.status,s.owner,
+                      s.last_ingested_at,s.last_error,s.created_at,s.updated_at,
+                      COUNT(DISTINCT e.id) entity_count,
+                      SUM(CASE WHEN e.routed='apply' THEN 1 ELSE 0 END) routed_apply,
+                      SUM(CASE WHEN e.routed='watchlist' THEN 1 ELSE 0 END) routed_watchlist,
+                      SUM(CASE WHEN e.routed='cold_email' THEN 1 ELSE 0 END) routed_email,
+                      SUM(CASE WHEN e.routed='review' THEN 1 ELSE 0 END) routed_review
+               FROM external_sources s LEFT JOIN extracted_entities e ON e.source_id=s.id
+               GROUP BY s.id ORDER BY s.updated_at DESC LIMIT 100"""
+        ).fetchall()
+        route_rows = db.execute(
+            "SELECT routed,COUNT(*) count FROM extracted_entities GROUP BY routed"
+        ).fetchall()
+    return {
+        "items": [dict(row) for row in rows],
+        "routes": {row["routed"]: row["count"] for row in route_rows},
+    }
+
+
+@app.post("/api/external-sources", status_code=201)
+def create_external_source(item: ExternalSourceInput) -> dict:
+    source_id, ts = str(uuid.uuid4()), now()
+    try:
+        with connect(settings().control_db) as db:
+            db.execute(
+                """INSERT INTO external_sources(
+                     id,name,url,kind,category,status,owner,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,'queued',?,?,?)""",
+                (source_id, item.name.strip(), item.url.strip(), item.kind,
+                 item.category, item.owner, ts, ts),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "source URL already exists") from exc
+    return {"id": source_id, "status": "queued"}
+
+
+@app.get("/api/cold-email/contacts")
+def cold_email_contacts(status_filter: str | None = Query(None, alias="status")) -> dict:
+    with connect(settings().control_db, readonly=True) as db:
+        rows = db.execute(
+            """SELECT c.id,c.company,c.email,c.website,c.role,c.source_id,c.template_id,
+                      c.status,c.draft_subject,c.draft_body,c.drafted_at,c.last_sent_at,
+                      c.created_at,c.updated_at,s.name source_name
+               FROM cold_contacts c LEFT JOIN external_sources s ON s.id=c.source_id
+               WHERE (? IS NULL OR c.status=?)
+               ORDER BY COALESCE(c.updated_at,c.created_at) DESC LIMIT 100""",
+            (status_filter, status_filter),
+        ).fetchall()
+        counts = db.execute(
+            "SELECT status,COUNT(*) count FROM cold_contacts GROUP BY status"
+        ).fetchall()
+    return {
+        "items": [dict(row) for row in rows],
+        "counts": {row["status"]: row["count"] for row in counts},
+        "manual_send_only": True,
+    }
+
+
+@app.post("/api/cold-email/contacts", status_code=201)
+def create_cold_email_contact(item: ColdContactInput) -> dict:
+    email = item.email.strip()
+    if not _valid_contact_email(email):
+        raise HTTPException(422, "valid company email required")
+    contact_id, ts = str(uuid.uuid4()), now()
+    try:
+        with connect(settings().control_db) as db:
+            if item.source_id and not db.execute(
+                "SELECT 1 FROM external_sources WHERE id=?", (item.source_id,)
+            ).fetchone():
+                raise HTTPException(404, "source not found")
+            db.execute(
+                """INSERT INTO cold_contacts(
+                     id,company,email,email_norm,website,role,requirements,source_id,status,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,'queued',?,?)""",
+                (contact_id, item.company.strip(), email, email.lower(), item.website,
+                 item.role, item.requirements, item.source_id, ts, ts),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "contact email already exists") from exc
+    return {"id": contact_id, "status": "queued"}
+
+
+@app.get("/api/cold-email/templates")
+def cold_email_templates() -> dict:
+    with connect(settings().control_db, readonly=True) as db:
+        rows = db.execute(
+            "SELECT id,name,subject,body,is_default,created_at,updated_at FROM cold_email_templates ORDER BY is_default DESC,updated_at DESC"
+        ).fetchall()
+    return {"items": [dict(row) for row in rows]}
+
+
+@app.post("/api/cold-email/templates", status_code=201)
+def create_cold_email_template(item: ColdTemplateInput) -> dict:
+    template_id, ts = str(uuid.uuid4()), now()
+    with connect(settings().control_db) as db:
+        if item.is_default:
+            db.execute("UPDATE cold_email_templates SET is_default=0")
+        db.execute(
+            """INSERT INTO cold_email_templates(id,name,subject,body,is_default,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (template_id, item.name.strip(), item.subject, item.body,
+             int(item.is_default), ts, ts),
+        )
+    return {"id": template_id, "is_default": item.is_default}
+
+
+@app.post("/api/cold-email/contacts/{contact_id}/draft")
+def draft_cold_email(contact_id: str, item: ColdDraftInput) -> dict:
+    with connect(settings().control_db) as db:
+        contact = db.execute("SELECT * FROM cold_contacts WHERE id=?", (contact_id,)).fetchone()
+        if not contact:
+            raise HTTPException(404, "contact not found")
+        template = None
+        if item.template_id:
+            template = db.execute(
+                "SELECT * FROM cold_email_templates WHERE id=?", (item.template_id,)
+            ).fetchone()
+            if not template:
+                raise HTTPException(404, "template not found")
+        elif not (item.subject and item.body):
+            template = db.execute(
+                "SELECT * FROM cold_email_templates ORDER BY is_default DESC,updated_at DESC LIMIT 1"
+            ).fetchone()
+        subject_source = item.subject if item.subject is not None else (template["subject"] if template else "")
+        body_source = item.body if item.body is not None else (template["body"] if template else "")
+        if not subject_source.strip() or not body_source.strip():
+            raise HTTPException(422, "template or subject and body required")
+        subject = _render_cold_template(subject_source, contact)
+        body = _render_cold_template(body_source, contact)
+        ts = now()
+        template_id = item.template_id or (template["id"] if template else None)
+        db.execute(
+            """UPDATE cold_contacts SET template_id=?,status='drafted',draft_subject=?,
+                      draft_body=?,drafted_at=?,updated_at=? WHERE id=?""",
+            (template_id, subject, body, ts, ts, contact_id),
+        )
+    compose = "https://mail.google.com/mail/?" + urlencode(
+        {"view": "cm", "fs": "1", "to": contact["email"], "su": subject, "body": body}
+    )
+    return {"id": contact_id, "status": "drafted", "subject": subject,
+            "body": body, "gmail_compose_url": compose}
+
+
+@app.post("/api/cold-email/contacts/{contact_id}/mark-sent")
+def mark_cold_email_sent(contact_id: str, item: ColdMarkSentInput) -> dict:
+    if not item.confirmed:
+        raise HTTPException(409, "manual send confirmation required")
+    send_id, ts = str(uuid.uuid4()), now()
+    with connect(settings().control_db) as db:
+        contact = db.execute("SELECT * FROM cold_contacts WHERE id=?", (contact_id,)).fetchone()
+        if not contact:
+            raise HTTPException(404, "contact not found")
+        db.execute(
+            """INSERT INTO cold_email_sends(
+                 id,contact_id,template_id,subject,status,provider_id,created_at
+               ) VALUES(?,?,?,?, 'sent',?,?)""",
+            (send_id, contact_id, contact["template_id"], contact["draft_subject"],
+             item.provider_id, ts),
+        )
+        db.execute(
+            "UPDATE cold_contacts SET status='sent',last_sent_at=?,updated_at=? WHERE id=?",
+            (ts, ts, contact_id),
+        )
+    return {"id": contact_id, "send_id": send_id, "status": "sent"}
+
+
+@app.post("/api/ingest/batch")
+def ingest_batch(item: IngestBatchInput) -> dict:
+    if _flag("ingest_enabled") != "1":
+        raise HTTPException(status.HTTP_409_CONFLICT, "ingest_disabled")
+    if len(item.entities) > 200:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "too_many_entities")
+    cfg = settings()
+    try:
+        return apply_batch(
+            str(cfg.control_db), str(cfg.queue_db), item.source_id, item.entities
+        )
+    except KeyError:
+        raise HTTPException(404, "unknown_source")
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+@app.post("/api/ingest/error")
+def ingest_error(payload: dict[str, Any]) -> dict:
+    source_id = str(payload.get("source_id") or "")
+    message = str(payload.get("message") or "ingest_error")[:500]
+    if not source_id:
+        raise HTTPException(400, "source_id required")
+    ts = now()
+    with connect(settings().control_db) as db:
+        db.execute(
+            """UPDATE external_sources
+               SET error_count=error_count+1, last_error=?, status=CASE WHEN error_count+1>=3 THEN 'paused' ELSE 'error' END, updated_at=?
+               WHERE id=?""",
+            (message, ts, source_id),
+        )
+        db.execute(
+            "INSERT INTO events(kind,severity,source,message,created_at) VALUES('ingest','error','n8n',?,?)",
+            (message, ts),
+        )
+    return {"ok": True}
+
+
 @app.get("/api/events")
 def events(limit: int = Query(50, ge=1, le=200)) -> list[dict]:
     with connect(settings().control_db, readonly=True) as db:
@@ -956,6 +1265,413 @@ def events(limit: int = Query(50, ge=1, le=200)) -> list[dict]:
                 "SELECT * FROM events ORDER BY created_at DESC LIMIT ?", (limit,)
             )
         ]
+
+
+WORKFLOW_CONTROL_TABLES = {
+    "candidate_profiles", "candidate_facts", "resume_versions", "resume_parse_facts",
+    "preference_sets", "preference_rules", "answer_entries", "operator_tasks",
+}
+WORKFLOW_QUEUE_TABLES = {"application_runs", "job_attempts", "workflow_actions"}
+
+
+def _tables(path: Path) -> set[str]:
+    if not path.is_file():
+        return set()
+    try:
+        with connect(path, readonly=True) as db:
+            return {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    except (OSError, sqlite3.Error):
+        return set()
+
+
+def _workflow_available(*, queue: bool = False) -> bool:
+    required = WORKFLOW_QUEUE_TABLES if queue else WORKFLOW_CONTROL_TABLES
+    path = settings().queue_db if queue else settings().control_db
+    return required <= _tables(path)
+
+
+def _require_workflow(*, queue: bool = False) -> None:
+    if not _workflow_available(queue=queue):
+        raise HTTPException(503, "workflow database migration is not available")
+
+
+def _profile_service():
+    from workflow.profile_service import ProfileService
+    return ProfileService(settings().control_db, settings().resume_storage, _vault())
+
+
+class ProfileDraftInput(BaseModel):
+    facts: dict[str, Any] = Field(min_length=1, max_length=200)
+    source_resume_version_id: str | None = Field(default=None, max_length=64)
+
+
+class ResumeFactReviewInput(BaseModel):
+    action: Literal["accepted", "edited", "rejected"]
+    value: Any | None = None
+
+
+class PreferenceRuleInput(BaseModel):
+    criterion: str = Field(min_length=1, max_length=200)
+    mode: Literal["hard", "soft", "none"]
+    operator: str = Field(min_length=1, max_length=30)
+    expected: Any
+    weight: float = Field(default=0, ge=0)
+    unknown_policy: Literal["block", "review", "ignore"] = "block"
+    ordinal: int = Field(default=0, ge=0)
+
+
+class PreferenceSetInput(BaseModel):
+    version: int = Field(ge=1)
+    rules: list[PreferenceRuleInput] = Field(min_length=1, max_length=200)
+
+
+class AnswerInput(BaseModel):
+    question_key: str = Field(min_length=1, max_length=200)
+    answer: Any
+    answer_type: str = Field(min_length=1, max_length=50)
+    scope: dict[str, Any] = Field(default_factory=dict)
+    provenance: str = Field(min_length=1, max_length=100)
+
+
+class TaskResolutionInput(BaseModel):
+    resolution: Literal["resolved", "dismissed"] = "resolved"
+
+
+@app.get("/api/analytics")
+@app.get("/api/workflow/analytics")
+def workflow_analytics(
+    range_name: str = Query("7d", alias="range"),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    bucket: Literal["hourly", "daily", "weekly", "monthly"] | None = None,
+) -> dict:
+    if not settings().queue_db.is_file():
+        return {"available": False, "range": {"name": range_name}, "timeline": []}
+    from workflow.analytics import aggregate_analytics
+    try:
+        result = aggregate_analytics(settings().queue_db, range_name, bucket=bucket,
+                                     custom_start=start, custom_end=end)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    result["available"] = any(result["capabilities"].values())
+    return result
+
+
+@app.get("/api/workflow/profiles")
+def workflow_profiles() -> dict:
+    if not _workflow_available():
+        return {"available": False, "items": []}
+    with connect(settings().control_db, readonly=True) as db:
+        rows = db.execute("""SELECT p.id,p.revision,p.status,p.created_at,p.approved_at,
+            p.source_resume_version_id,count(f.id) fact_count
+            FROM candidate_profiles p LEFT JOIN candidate_facts f ON f.profile_id=p.id
+            GROUP BY p.id ORDER BY p.revision DESC""").fetchall()
+    return {"available": True, "items": [dict(row) for row in rows]}
+
+
+@app.get("/api/workflow/candidate")
+def workflow_candidate() -> dict:
+    if not _workflow_available():
+        return {"available": False, "complete": False, "missing_fields": ["workflow_control_schema"]}
+    summary = _profile_service().readiness_summary()
+    with connect(settings().control_db, readonly=True) as db:
+        row = db.execute("SELECT id,revision,status,created_at,approved_at,source_resume_version_id FROM candidate_profiles WHERE status='approved' ORDER BY revision DESC LIMIT 1").fetchone()
+    return {"available": True, "complete": row is not None,
+            "profile": dict(row) if row else None, "missing_fields": summary["missing"]}
+
+
+@app.post("/api/workflow/profiles", status_code=201)
+def create_workflow_profile(item: ProfileDraftInput) -> dict:
+    _require_workflow()
+    profile_id = _profile_service().create_profile(item.facts, source_resume_version_id=item.source_resume_version_id)
+    return {"id": profile_id, "status": "draft"}
+
+
+@app.get("/api/workflow/profiles/{profile_id}")
+def workflow_profile(profile_id: str) -> dict:
+    _require_workflow()
+    try:
+        return _profile_service().get_profile(profile_id)
+    except KeyError as exc:
+        raise HTTPException(404, "profile not found") from exc
+
+
+@app.post("/api/workflow/profiles/{profile_id}/approve")
+def approve_workflow_profile(profile_id: str) -> dict:
+    _require_workflow()
+    try:
+        _profile_service().approve_profile(profile_id)
+    except KeyError as exc:
+        raise HTTPException(404, "profile not found") from exc
+    return {"id": profile_id, "status": "approved"}
+
+
+@app.get("/api/workflow/resumes")
+def workflow_resumes() -> dict:
+    if not _workflow_available():
+        return {"available": False, "items": []}
+    with connect(settings().control_db, readonly=True) as db:
+        rows = db.execute("SELECT id,original_name,media_type,size_bytes,parse_status,parser_name,parser_version,created_at,parsed_at,approved_at,supersedes_id,safe_error FROM resume_versions ORDER BY created_at DESC").fetchall()
+    return {"available": True, "items": [dict(row) for row in rows]}
+
+
+def _multipart_file(content_type: str, body: bytes) -> tuple[str, str | None, bytes]:
+    """Extract the single `file` part without requiring an optional parser package."""
+    if not content_type.lower().startswith("multipart/form-data") or "boundary=" not in content_type:
+        raise ValueError("multipart/form-data with a boundary is required")
+    boundary = content_type.split("boundary=", 1)[1].strip().strip('"')
+    if not boundary or len(boundary) > 200:
+        raise ValueError("invalid multipart boundary")
+    marker = b"--" + boundary.encode("ascii", "strict")
+    for part in body.split(marker):
+        if b"\r\n\r\n" not in part:
+            continue
+        header_blob, payload = part.split(b"\r\n\r\n", 1)
+        headers = header_blob.decode("latin-1").lower()
+        if 'name="file"' not in headers:
+            continue
+        original_headers = header_blob.decode("latin-1")
+        filename = ""
+        disposition = next(
+            (line for line in original_headers.split("\r\n") if line.lower().startswith("content-disposition:")),
+            "",
+        )
+        for token in disposition.split(";"):
+            if token.strip().lower().startswith("filename="):
+                filename = token.split("=", 1)[1].strip().strip('"')
+        media_type = None
+        for line in original_headers.split("\r\n"):
+            if line.lower().startswith("content-type:"):
+                media_type = line.split(":", 1)[1].strip()
+        return filename, media_type, payload.removesuffix(b"\r\n").removesuffix(b"--")
+    raise ValueError("multipart request must contain one file field")
+
+
+@app.post("/api/workflow/resumes", status_code=201)
+async def upload_workflow_resume(request: Request) -> dict:
+    _require_workflow()
+    limit = 5 * 1024 * 1024
+    try:
+        body = await request.body()
+        if len(body) > limit + 64 * 1024:
+            raise ValueError(f"multipart request exceeds {limit} byte file limit")
+        filename, media_type, data = _multipart_file(request.headers.get("content-type", ""), body)
+        resume_id = _profile_service().upload_resume(filename, data, media_type)
+    except (UnicodeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"id": resume_id, "parse_status": "pending"}
+
+
+@app.post("/api/workflow/resumes/{resume_id}/parse")
+def parse_workflow_resume(resume_id: str) -> dict:
+    _require_workflow()
+    try:
+        facts = _profile_service().parse_resume(resume_id)
+    except KeyError as exc:
+        raise HTTPException(404, "resume not found") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"id": resume_id, "facts": facts}
+
+
+@app.get("/api/workflow/resumes/{resume_id}/facts")
+def workflow_resume_facts(resume_id: str) -> dict:
+    _require_workflow()
+    return {"id": resume_id, "facts": _profile_service().list_parse_facts(resume_id)}
+
+
+@app.put("/api/workflow/resume-facts/{fact_id}")
+def review_workflow_resume_fact(fact_id: int, item: ResumeFactReviewInput) -> dict:
+    _require_workflow()
+    try:
+        _profile_service().review_parse_fact(fact_id, item.action, item.value)
+    except KeyError as exc:
+        raise HTTPException(404, "resume fact not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"id": fact_id, "action": item.action}
+
+
+@app.post("/api/workflow/resumes/{resume_id}/approve")
+def approve_workflow_resume(resume_id: str) -> dict:
+    _require_workflow()
+    try:
+        profile_id = _profile_service().approve_resume(resume_id)
+    except KeyError as exc:
+        raise HTTPException(404, "resume not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"id": resume_id, "status": "approved", "profile_id": profile_id}
+
+
+@app.get("/api/workflow/preferences")
+def workflow_preferences() -> dict:
+    if not _workflow_available():
+        return {"available": False, "items": []}
+    with connect(settings().control_db, readonly=True) as db:
+        sets = [dict(r) for r in db.execute("SELECT id,version,status,created_at,activated_at FROM preference_sets ORDER BY version DESC")]
+        for item in sets:
+            item["rules"] = [dict(r) for r in db.execute("SELECT id,criterion,mode,operator,expected_json,weight,unknown_policy,ordinal FROM preference_rules WHERE preference_set_id=? ORDER BY ordinal", (item["id"],))]
+    return {"available": True, "items": sets}
+
+
+@app.post("/api/workflow/preferences", status_code=201)
+def create_workflow_preferences(item: PreferenceSetInput) -> dict:
+    _require_workflow()
+    from workflow.preferences import PreferenceRepository
+    try:
+        result = PreferenceRepository(settings().control_db).create_set(version=item.version, rules=[r.model_dump() for r in item.rules])
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "preference version already exists") from exc
+    return {"id": result.id, "version": result.version, "status": result.status}
+
+
+@app.post("/api/workflow/preferences/{version}/activate")
+def activate_workflow_preferences(version: int) -> dict:
+    _require_workflow()
+    from workflow.preferences import PreferenceRepository
+    try:
+        result = PreferenceRepository(settings().control_db).activate(version)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"id": result.id, "version": result.version, "status": result.status}
+
+
+def _answer_public(row: sqlite3.Row, *, include_answer: bool = False) -> dict:
+    result = {key: row[key] for key in ("id", "question_key", "answer_type", "version", "status", "provenance", "created_at", "approved_at")}
+    result["scope"] = json.loads(row["scope_json"])
+    if include_answer:
+        result["answer"] = json.loads(decrypt(row["answer_enc"]))
+    return result
+
+
+@app.get("/api/workflow/answer-bank")
+@app.get("/api/workflow/answers")
+def workflow_answers() -> dict:
+    if not _workflow_available():
+        return {"available": False, "items": []}
+    with connect(settings().control_db, readonly=True) as db:
+        rows = db.execute("SELECT * FROM answer_entries ORDER BY created_at DESC").fetchall()
+    return {"available": True, "items": [_answer_public(row) for row in rows]}
+
+
+@app.post("/api/workflow/answers", status_code=201)
+def create_workflow_answer(item: AnswerInput) -> dict:
+    _require_workflow()
+    answer_id, created = uuid.uuid4().hex, now()
+    with connect(settings().control_db) as db:
+        version = db.execute("SELECT coalesce(max(version),0)+1 FROM answer_entries WHERE question_key=?", (item.question_key,)).fetchone()[0]
+        db.execute("INSERT INTO answer_entries(id,question_key,answer_enc,answer_type,scope_json,version,status,provenance,created_at) VALUES(?,?,?,?,?,?,'draft',?,?)", (answer_id, item.question_key, encrypt(json.dumps(item.answer)), item.answer_type, json.dumps(item.scope, separators=(",", ":"), sort_keys=True), version, item.provenance, created))
+    return {"id": answer_id, "question_key": item.question_key, "version": version, "status": "draft"}
+
+
+@app.get("/api/workflow/answers/{answer_id}")
+def workflow_answer(answer_id: str) -> dict:
+    _require_workflow()
+    with connect(settings().control_db, readonly=True) as db:
+        row = db.execute("SELECT * FROM answer_entries WHERE id=?", (answer_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "answer not found")
+    return _answer_public(row, include_answer=True)
+
+
+@app.put("/api/workflow/answers/{answer_id}")
+def update_workflow_answer(answer_id: str, item: AnswerInput) -> dict:
+    _require_workflow()
+    with connect(settings().control_db) as db:
+        changed = db.execute("UPDATE answer_entries SET question_key=?,answer_enc=?,answer_type=?,scope_json=?,provenance=? WHERE id=? AND status='draft'", (item.question_key, encrypt(json.dumps(item.answer)), item.answer_type, json.dumps(item.scope, separators=(",", ":"), sort_keys=True), item.provenance, answer_id)).rowcount
+    if not changed:
+        raise HTTPException(409, "only an existing draft answer can be edited")
+    return {"id": answer_id, "status": "draft"}
+
+
+@app.delete("/api/workflow/answers/{answer_id}", status_code=204)
+def delete_workflow_answer(answer_id: str) -> None:
+    _require_workflow()
+    with connect(settings().control_db) as db:
+        changed = db.execute("DELETE FROM answer_entries WHERE id=? AND status='draft'", (answer_id,)).rowcount
+    if not changed:
+        raise HTTPException(409, "only an existing draft answer can be deleted")
+
+
+@app.post("/api/workflow/answers/{answer_id}/approve")
+def approve_workflow_answer(answer_id: str) -> dict:
+    _require_workflow()
+    with connect(settings().control_db) as db:
+        row = db.execute("SELECT question_key FROM answer_entries WHERE id=?", (answer_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "answer not found")
+        db.execute("UPDATE answer_entries SET status='retired' WHERE question_key=? AND status='approved' AND id<>?", (row[0], answer_id))
+        db.execute("UPDATE answer_entries SET status='approved',approved_at=? WHERE id=?", (now(), answer_id))
+    return {"id": answer_id, "status": "approved"}
+
+
+@app.get("/api/workflow/review-tasks")
+@app.get("/api/workflow/tasks")
+def workflow_tasks(status_filter: str | None = Query(None, alias="status")) -> dict:
+    if not _workflow_available():
+        return {"available": False, "items": []}
+    with connect(settings().control_db, readonly=True) as db:
+        rows = db.execute("SELECT id,run_id,site_id,type,status,safe_summary,artifact_id,created_at,resolved_at FROM operator_tasks WHERE (? IS NULL OR status=?) ORDER BY created_at DESC", (status_filter, status_filter)).fetchall()
+    return {"available": True, "items": [dict(row) for row in rows]}
+
+
+@app.post("/api/workflow/tasks/{task_id}/resolve")
+def resolve_workflow_task(task_id: str, item: TaskResolutionInput) -> dict:
+    _require_workflow()
+    with connect(settings().control_db) as db:
+        changed = db.execute("UPDATE operator_tasks SET status=?,resolved_at=? WHERE id=? AND status='open'", (item.resolution, now(), task_id)).rowcount
+    if not changed:
+        raise HTTPException(404, "open task not found")
+    return {"id": task_id, "status": item.resolution}
+
+
+@app.get("/api/workflow/runs")
+def workflow_runs(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict:
+    if not _workflow_available(queue=True):
+        return {"available": False, "total": 0, "items": []}
+    with connect(settings().queue_db, readonly=True) as db:
+        total = db.execute("SELECT count(*) FROM application_runs").fetchone()[0]
+        rows = db.execute("SELECT id,job_id,site_id,adapter,recipe_id,recipe_version,candidate_profile_id,resume_version_id,preference_set_id,site_manifest_version,worker_id,state,started_at,finished_at,confirmed,outcome_code,safe_detail FROM application_runs ORDER BY started_at DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+    return {"available": True, "total": total, "limit": limit, "offset": offset, "items": [dict(row) for row in rows]}
+
+
+@app.get("/api/workflow/runs/{run_id}/trace")
+@app.get("/api/workflow/runs/{run_id}")
+def workflow_run_trace(run_id: str) -> dict:
+    _require_workflow(queue=True)
+    with connect(settings().queue_db, readonly=True) as db:
+        run = db.execute("SELECT id,job_id,site_id,adapter,recipe_id,recipe_version,candidate_profile_id,resume_version_id,preference_set_id,site_manifest_version,worker_id,state,started_at,finished_at,confirmed,outcome_code,safe_detail FROM application_runs WHERE id=?", (run_id,)).fetchone()
+        if run is None:
+            raise HTTPException(404, "run not found")
+        attempts = [dict(row) for row in db.execute("SELECT id,run_id,attempt_no,started_at,finished_at,outcome_code,retryable,safe_detail FROM job_attempts WHERE run_id=? ORDER BY attempt_no", (run_id,))]
+        for attempt in attempts:
+            attempt["actions"] = [dict(row) for row in db.execute("SELECT id,run_id,attempt_id,ordinal,action_type,intent,target_ref,input_ref,source,precondition_json,postcondition_json,status,started_at,finished_at,safe_detail FROM workflow_actions WHERE attempt_id=? ORDER BY ordinal", (attempt["id"],))]
+    result = dict(run)
+    result["attempts"] = attempts
+    return result
+
+
+@app.get("/api/workflow/readiness")
+def workflow_readiness() -> dict:
+    control_available = _workflow_available()
+    queue_available = _workflow_available(queue=True)
+    if not control_available:
+        return {"available": False, "ready": False, "missing": ["workflow_control_schema"], "queue_available": queue_available}
+    summary = _profile_service().readiness_summary()
+    missing = list(summary["missing"])
+    if not queue_available:
+        missing.append("workflow_queue_schema")
+    with connect(settings().control_db, readonly=True) as db:
+        preferences = db.execute("SELECT id FROM preference_sets WHERE status='active' LIMIT 1").fetchone()
+        open_tasks = db.execute("SELECT count(*) FROM operator_tasks WHERE status='open'").fetchone()[0]
+    if preferences is None:
+        missing.append("active_preferences")
+    return {"available": True, "ready": not missing, "missing": missing,
+            "approved_profile_id": summary["approved_profile_id"],
+            "approved_resume_id": summary["approved_resume_id"],
+            "active_preference_set_id": preferences[0] if preferences else None,
+            "open_operator_tasks": open_tasks, "queue_available": queue_available}
 
 
 @app.get("/")

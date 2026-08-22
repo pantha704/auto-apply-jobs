@@ -1,0 +1,24 @@
+[Unit]
+Description=Job hunt external-source worker %i
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/job_hunt_linkedin
+EnvironmentFile=-/etc/jobhunt/job-hunt.env
+Environment=TMPDIR=/home/ubuntu/tmp_chrome
+ExecStartPre=/bin/bash /home/ubuntu/job_hunt_linkedin/reset_claims.sh ext-%i external
+ExecStart=/home/ubuntu/jobhunt-venv/bin/python /home/ubuntu/job_hunt_linkedin/worker_external.py ext-%i
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/job_hunt_linkedin /home/ubuntu/tmp_chrome
+
+[Install]
+WantedBy=multi-user.target

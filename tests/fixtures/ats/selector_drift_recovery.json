@@ -1,0 +1,24 @@
+{
+  "fixture_only": true,
+  "adapter": "synthetic-ats",
+  "manifest_version": 2,
+  "url": "https://synthetic-ats.invalid/jobs/fixture-drift/apply",
+  "company": "Fixture Company",
+  "role": "Fixture Engineer",
+  "questions": ["candidate.email"],
+  "known_answers": ["candidate.email"],
+  "selector_status": "drifted",
+  "recovery": {
+    "succeeds": true,
+    "actions": [
+      {"action_type": "fill", "intent": "email", "input_ref": "candidate.email", "target_kind": "field", "postcondition_verified": true},
+      {"action_type": "click", "intent": "submit", "input_ref": null, "target_kind": "button", "postcondition_verified": true}
+    ]
+  },
+  "submit_clicked": true,
+  "confirmation": {
+    "url": "https://synthetic-ats.invalid/applications/fixture-drift/confirmation",
+    "success_text": "Thanks for applying",
+    "application_id": "fixture-drift"
+  }
+}

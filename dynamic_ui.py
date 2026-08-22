@@ -326,3 +326,81 @@ def report_miss(page, portal: str, intent: str, url: str = "") -> str:
 def remember(portal: str, intent: str, spec: dict, *, verified: bool = False) -> bool:
     """Compatibility wrapper; callers must explicitly prove verification."""
     return remember_after_verified(portal, intent, spec, verified=verified)
+
+
+def hybrid_click(page, portal: str, intent: str, cdp_url: str, *, postcondition=None) -> bool:
+    """Route a low-risk click through deterministic Playwright, then BU recovery."""
+    from workflow.adapters.base import DriverAction, RuntimeContext
+    from workflow.browser_use_client import BrowserUseSidecar
+    from workflow.leases import FileSessionLease
+    from workflow.page_runtime import PlaywrightPageDriver
+    from workflow.runner import RuntimeRouter
+
+    class Adapter:
+        name = portal
+
+        def plan(self, candidates, context):
+            for spec in intents(portal, intent):
+                wanted = str(spec.get("name") or spec.get("text") or "").casefold()
+                for candidate in candidates:
+                    if wanted and wanted in candidate.label.casefold():
+                        return (DriverAction("click", intent, candidate.candidate_id),)
+            return ()
+
+    driver = PlaywrightPageDriver(page)
+    router = RuntimeRouter(
+        driver,
+        FileSessionLease(),
+        Adapter(),
+        BrowserUseSidecar(cdp_url),
+        recovery_mode="execute",
+        recovery_verifier=lambda _context, _trace: bool(postcondition()) if postcondition else True,
+    )
+    result = router.run(RuntimeContext(f"{portal}:{intent}", getattr(page, "url", "about:blank")))
+    return result.route.value in {"recipe", "deterministic", "recovery"}
+
+
+def browser_use_shadow_analysis(page, portal: str, intent: str, provider) -> dict | None:
+    from workflow.recovery import ActionCandidate, ActionRisk, sanitized_request
+    candidates = []
+    for item in sanitize_controls(snapshot_actionable_controls(page)):
+        try:
+            candidate = ActionCandidate(str(item["id"]), str(item["role"]), str(item["name"]))
+        except (KeyError, ValueError):
+            continue
+        if candidate.actionable:
+            candidates.append(candidate)
+    request = sanitized_request(candidates, site_id=portal, intent=intent)
+    if not request.candidates:
+        return None
+    trace = tuple(provider.recover(request))
+    if len(trace) != 1:
+        return None
+    action = trace[0]
+    by_id = {item.candidate_id: item for item in request.candidates}
+    candidate = by_id.get(action.candidate_id)
+    if candidate is None or candidate.role != action.target_role or action.risk_for(candidate) is not ActionRisk.LOW:
+        return None
+    return {"candidate_id": candidate.candidate_id, "role": candidate.role, "intent": intent}
+
+
+def record_recovery_shadow_task(portal: str, proposal: dict) -> str | None:
+    import sqlite3
+    import uuid
+    from datetime import datetime, timezone
+    candidate_id = str(proposal.get("candidate_id") or "")
+    intent = str(proposal.get("intent") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", candidate_id) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", intent):
+        return None
+    summary = f"{portal} recovery shadow proposed {candidate_id} for {intent}"
+    path = os.environ.get("JOBHUNT_CONTROL_DB", "/var/lib/jobhunt/controlplane.db")
+    try:
+        with sqlite3.connect(path, timeout=5) as db:
+            row = db.execute("SELECT id FROM operator_tasks WHERE status='open' AND type='recipe_drift' AND safe_summary=? LIMIT 1", (summary,)).fetchone()
+            if row:
+                return str(row[0])
+            task_id = uuid.uuid4().hex
+            db.execute("INSERT INTO operator_tasks (id,run_id,site_id,type,status,safe_summary,created_at) VALUES(?,NULL,NULL,'recipe_drift','open',?,?)", (task_id, summary, datetime.now(timezone.utc).isoformat()))
+            return task_id
+    except (OSError, sqlite3.Error):
+        return None

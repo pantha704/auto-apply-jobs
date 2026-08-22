@@ -1,0 +1,19 @@
+{
+  "fixture_only": true,
+  "adapter": "synthetic-ats",
+  "manifest_version": 2,
+  "url": "https://synthetic-ats.invalid/jobs/fixture-failed-recovery/apply",
+  "company": "Fixture Company",
+  "role": "Fixture Engineer",
+  "questions": ["candidate.email"],
+  "known_answers": ["candidate.email"],
+  "selector_status": "drifted",
+  "recovery": {
+    "succeeds": false,
+    "actions": [
+      {"action_type": "fill", "intent": "email", "input_ref": "candidate.email", "target_kind": "field", "postcondition_verified": false}
+    ]
+  },
+  "submit_clicked": false,
+  "confirmation": null
+}

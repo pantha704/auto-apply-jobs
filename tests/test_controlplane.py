@@ -250,3 +250,46 @@ def test_authentication_covers_api_root_and_static_assets(dashboard, monkeypatch
             assert protected.headers["referrer-policy"] == "no-referrer"
     finally:
         app_module.settings.cache_clear()
+
+
+def test_workflow_aliases_match_public_overview_sites_workers(dashboard):
+    client, _, _ = dashboard
+    overview = client.get("/api/overview")
+    sites = client.get("/api/sites")
+    workers = client.get("/api/workers")
+    alias_overview = client.get("/api/workflow/overview")
+    alias_sites = client.get("/api/workflow/sites")
+    alias_workers = client.get("/api/workflow/workers")
+    assert alias_overview.status_code == 200
+    assert alias_sites.status_code == 200
+    assert alias_workers.status_code == 200
+    assert alias_overview.json() == overview.json()
+    assert alias_sites.json() == sites.json()
+    assert alias_workers.json() == workers.json()
+
+
+def test_spa_exposes_history_issues_and_site_form():
+    from pathlib import Path
+
+    root = Path("/home/ubuntu/job_hunt_linkedin/controlplane/static")
+    html = (root / "index.html").read_text()
+    js = (root / "app.js").read_text()
+    assert 'data-page="history"' in html
+    assert 'data-page="issues"' in html
+    assert 'id="site-form"' in html
+    assert "history:" in js
+    assert "issues:" in js
+    assert "/api/applications" in js
+    assert "/api/issues" in js
+    assert "/api/sites" in js
+
+
+def test_initialize_applies_control_v2(dashboard):
+    _, control, _ = dashboard
+    import sqlite3
+
+    db = sqlite3.connect(control)
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "external_sources" in tables
+    assert dict(db.execute("SELECT key, value FROM control_flags"))["ingest_enabled"] == "0"
+    db.close()

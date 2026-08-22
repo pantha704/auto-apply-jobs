@@ -170,6 +170,18 @@ Warm profiles stay on disk (gitignored):
 
 Naukri is parked (Akamai from datacenter IPs).
 
+### Discovery resources
+
+The following resources were added to `resource_sources.json`. They are *not* active job-board collectors: they are directories/workbooks. A discovery pass must extract current career-page URLs, validate live openings and hiring geography, then send those jobs through the normal title/JD/location/deduplication gates.
+
+| Resource | Priority | Purpose |
+|---|---:|---|
+| India Remote Startups Database | High | India-focused startup and careers discovery |
+| Remote Job Seeker's Resource Hub | High | Remote boards and remote-first company discovery |
+| Remotive 900+ remote startups | Medium | Worldwide startup/company discovery |
+| Lets Code 100% remote hiring companies | Medium | Remote company/careers discovery |
+| Remotive 150+ remote startups | Medium | Additional remote startup/company discovery |
+
 ---
 
 ## 6. Truth table

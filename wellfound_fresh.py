@@ -161,37 +161,39 @@ def main():
     # Wellfound closes listings within days-to-hours; render-verified is necessary
     # but not sufficient — probe status live so the injected pool is ~all apply-able.
     if fresh:
-        verify_ctx = None
-        try:
-            verify_ctx = p.chromium.launch_persistent_context(
-                user_data_dir="/tmp/cloak_profile_wf_verify", executable_path=CLOAK, headless=True,
-                args=["--no-first-run", "--no-default-browser-check",
-                      "--disable-blink-features=AutomationControlled", "--window-size=1280,900"])
+        with sync_playwright() as verify_p:
+            verify_ctx = None
             try:
-                verify_ctx.add_cookies(cookies)
-            except Exception:
-                pass
-            vpage = verify_ctx.pages[0] if verify_ctx.pages else verify_ctx.new_page()
-            vpage.goto("about:blank")
-            live = {}
-            for k, v in fresh.items():
+                verify_ctx = verify_p.chromium.launch_persistent_context(
+                    user_data_dir="/tmp/cloak_profile_wf_verify", executable_path=CLOAK, headless=True,
+                    args=["--no-first-run", "--no-default-browser-check",
+                          "--disable-blink-features=AutomationControlled", "--window-size=1280,900"])
                 try:
-                    vpage.goto(v["link"], wait_until="domcontentloaded", timeout=20000)
-                    if vpage.url and vpage.url.startswith("https://wellfound.com/jobs/"):
-                        live[k] = v  # if it rendered a job page, it's 200-able
+                    verify_ctx.add_cookies(cookies)
                 except Exception:
                     pass
-                time.sleep(0.3)
-            fresh = live
-            print(f"[fresh] post-verify live={len(fresh)}", flush=True)
-        except Exception as e:
-            print(f"[fresh] verify err {str(e)[:100]}", flush=True)
-        finally:
-            try:
-                if verify_ctx:
-                    verify_ctx.close()
-            except Exception:
-                pass
+                vpage = verify_ctx.pages[0] if verify_ctx.pages else verify_ctx.new_page()
+                vpage.goto("about:blank")
+                live = {}
+                for k, v in fresh.items():
+                    try:
+                        vpage.goto(v["link"], wait_until="domcontentloaded", timeout=20000)
+                        if vpage.url and vpage.url.startswith("https://wellfound.com/jobs/"):
+                            live[k] = v
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+                fresh = live
+                print(f"[fresh] post-verify live={len(fresh)}", flush=True)
+            except Exception as e:
+                print(f"[fresh] verify err {str(e)[:100]}", flush=True)
+                raise
+            finally:
+                try:
+                    if verify_ctx:
+                        verify_ctx.close()
+                except Exception:
+                    pass
 
     now = time.time()
     cutoff = now - FRESH_DAYS * 86400

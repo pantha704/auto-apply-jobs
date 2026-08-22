@@ -196,7 +196,7 @@ li_done = c.execute("SELECT COUNT(*) FROM jobs WHERE portal='linkedin' AND statu
 li_pending = c.execute("SELECT COUNT(*) FROM jobs WHERE portal='linkedin' AND status='pending'").fetchone()[0]
 c.close()
 if pending == 0:
-    ALERTS.append(f"QUEUE EXHAUSTED: 0 pending (done={done_total}) — needs fresh scrape")
+    alert("queue_exhausted", f"QUEUE EXHAUSTED: 0 pending (processed={done_total}) — needs fresh scrape")
 
 # ---- 3. stalled worker detection — DB activity is the source of truth ----
 try:
@@ -253,20 +253,57 @@ try:
 except Exception as e:
     ALERTS.append(f"li_state err: {e}")
 
-# ---- 6. scraper cron health ----
+# ---- 6. scraper cron/content health ----
 try:
-    for fname, max_age_h, label in [
-        ("jobs_raw_r3600_india.json", 3.0, "fresh-1h (hourly LinkedIn pass)"),
-        ("jobs_raw_r86400_india.json", 7.0, "fresh-24h (6h LinkedIn pass)"),
-        ("/tmp/site_collect.json", 5.0, "refill (3h collect+inject)"),
+    def newest_post_age_hours(path):
+        data = json.load(open(path))
+        if isinstance(data, dict):
+            jobs = data.get("jobs", [])
+        else:
+            jobs = [j for group in data if isinstance(group, dict) for j in group.get("jobs", [])]
+        stamps = []
+        for job in jobs:
+            raw = job.get("posted_at") or job.get("date") or job.get("posted_iso")
+            if raw is None:
+                continue
+            try:
+                if isinstance(raw, (int, float)):
+                    dt = datetime.fromtimestamp(raw, timezone.utc)
+                else:
+                    text = str(raw)
+                    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+                        # LinkedIn guest HTML exposes calendar-day precision.
+                        # Treat today as current rather than midnight-hours-old.
+                        stamps.append(now - timedelta(days=(now.date() - datetime.fromisoformat(text).date()).days))
+                        continue
+                    dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                stamps.append(dt)
+            except Exception:
+                continue
+        return (now - max(stamps)).total_seconds() / 3600 if stamps else None
+
+    for fname, max_file_age_h, max_post_age_h, label, key in [
+        ("jobs_raw_r3600_india.json", 2.0, 3.0, "fresh-1h LinkedIn", "cron_li_1h"),
+        ("jobs_raw_r86400_india.json", 7.0, 26.0, "fresh-24h LinkedIn", "cron_li_24h"),
+        ("/tmp/wellfound_fresh.json", 13.0, 31 * 24.0, "Wellfound fresh", "cron_wf_fresh"),
+        ("/tmp/site_collect.json", 13.0, None, "site refill", "cron_site_refill"),
     ]:
         p = fname if fname.startswith("/") else os.path.join(HERE, fname)
         if not os.path.exists(p):
-            alert("cron_stale", f"{label}: checkpoint {fname} MISSING — cron never ran?")
+            alert(key, f"{label}: source {fname} missing")
             continue
         age_h = (time.time() - os.path.getmtime(p)) / 3600
-        if age_h > max_age_h:
-            alert("cron_stale", f"{label}: checkpoint {age_h:.1f}h old — scrape cron likely FAILING")
+        if age_h > max_file_age_h:
+            alert(key, f"{label}: output file {age_h:.1f}h old")
+            continue
+        if max_post_age_h is not None:
+            post_age = newest_post_age_hours(p)
+            if post_age is None:
+                alert(key, f"{label}: output has no parseable posting timestamps")
+            elif post_age > max_post_age_h:
+                alert(key, f"{label}: newest actual posting is {post_age:.1f}h old")
 except Exception as e:
     ALERTS.append(f"cron health err: {e}")
 

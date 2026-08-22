@@ -8,7 +8,9 @@ from playwright.sync_api import sync_playwright
 import audit
 import dynamic_ui
 import jd_match
-from title_filter import is_tech_title
+from workflow.browser_use_client import BrowserUseSidecar
+from submission_signals import has_submission_confirmation
+from title_filter import is_tech_title, title_rejection_reason
 from worker_guard import BrowserWatchdog, exit_if_fired
 import profile as ident
 
@@ -21,6 +23,11 @@ RESUME = "/home/ubuntu/Documents/Pratham_Jaiswal_Updated_Resume.pdf"
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "wf-w1"
 PASSWORD = os.environ.get("WF_PASSWORD", "")
 SALARY_USD = os.environ.get("WF_SALARY_USD", "85000")
+RECOVERY_MODE = os.environ.get("JOBHUNT_RECOVERY_MODE", "disabled").lower()
+_worker_match = re.search(r"(\d+)$", WORKER_ID)
+_worker_number = int(_worker_match.group(1)) if _worker_match else 1
+CDP_PORT = int(os.environ.get("WF_CDP_PORT", str(9330 + _worker_number)))
+CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 
 # Real apply modal only — excludes TrustArc consent banner (also role=dialog)
 APPLY_DIALOG = "[role=dialog][aria-modal=true]:not([id*=truste]):not([id*=consent]), .ReactModal__Content"
@@ -32,19 +39,34 @@ PROFILE = {"name": ident.NAME, "email": ident.EMAIL,
            "location": f"{ident.CITY}, India" if ident.CITY else "", "years": "1", "salary": SALARY_USD,
            "note": "Full-stack & Solana engineer (Turbin3 cohort; 4 merged OSS PRs). Built AI crawler, DeFi credit scoring, RWA tokenization platform."}
 
+
+def safe_diagnostic_text(text):
+    """Remove known candidate values before persisting browser diagnostics."""
+    safe = text or ""
+    values = [PROFILE.get("name"), PROFILE.get("email"), PROFILE.get("location")]
+    for value in values:
+        if value and len(str(value)) >= 3:
+            safe = re.sub(re.escape(str(value)), "[REDACTED]", safe, flags=re.I)
+    return safe
+
 def db():
     return sqlite3.connect(os.path.join(HERE, "apply_queue.db"))
 
 def claim():
-    c = db()
-    row = c.execute("SELECT id, url, title FROM jobs WHERE portal='wellfound' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
-    if not row:
-        c.close(); return None
-    upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
-    c.commit(); c.close()
-    if upd.rowcount != 1:
-        return claim()
-    return {"id": row[0], "url": row[1], "title": row[2]}
+    while True:
+        c = db()
+        row = c.execute("SELECT id, url, title FROM jobs WHERE portal='wellfound' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
+        if not row:
+            c.close(); return None
+        reason = title_rejection_reason(row[2] or "", "wellfound")
+        if reason:
+            c.execute("UPDATE jobs SET status='skip', result=? WHERE id=? AND status='pending'", (reason, row[0]))
+            c.commit(); c.close()
+            continue
+        upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
+        c.commit(); c.close()
+        if upd.rowcount == 1:
+            return {"id": row[0], "url": row[1], "title": row[2]}
 
 def mark(jid, status, result=""):
     c = db()
@@ -134,6 +156,39 @@ def dismiss_consent(page):
     return False
 
 
+def recovery_shadow(page, intent):
+    """Analyze pre-fill UI drift without allowing Browser Use to mutate the page."""
+    if RECOVERY_MODE != "shadow":
+        return None
+    try:
+        provider = BrowserUseSidecar(CDP_URL)
+        proposal = dynamic_ui.browser_use_shadow_analysis(
+            page, "wellfound", intent, provider
+        )
+        if proposal:
+            dynamic_ui.record_recovery_shadow_task("wellfound", proposal)
+            print(
+                f"[{WORKER_ID}] recovery-shadow proposal {proposal['candidate_id']} for {intent}",
+                flush=True,
+            )
+        return proposal
+    except Exception as exc:
+        print(
+            f"[{WORKER_ID}] recovery-shadow unavailable: {type(exc).__name__}",
+            flush=True,
+        )
+        return None
+
+
+def apply_dialog_open(page) -> bool:
+    """Wait for the verified navigation postcondition after an Apply click."""
+    try:
+        page.locator(APPLY_DIALOG).first.wait_for(state="visible", timeout=6000)
+        return True
+    except Exception:
+        return False
+
+
 def apply_one(url, jid=None):
     global GUARD
     for attempt in range(2):
@@ -163,6 +218,7 @@ def _apply_one(url):
         ctx = p.chromium.launch_persistent_context(
             user_data_dir=os.path.join(HERE, "profiles", f"wf_w_{WORKER_ID}"), executable_path=CLOAK, headless=True,
             args=["--no-first-run", "--no-default-browser-check", "--disable-blink-features=AutomationControlled",
+                  "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={CDP_PORT}",
                   "--window-size=1400,900"])
         if os.path.exists(STATE):
             try: ctx.add_cookies(json.load(open(STATE)).get("cookies", []))
@@ -201,7 +257,13 @@ def _apply_one(url):
             dialog_open = False
             for attempt in range(3):
                 try:
-                    if not dynamic_ui.click(page, "wellfound", "apply"):
+                    if not dynamic_ui.hybrid_click(
+                        page,
+                        "wellfound",
+                        "apply",
+                        CDP_URL,
+                        postcondition=lambda: apply_dialog_open(page),
+                    ):
                         break
                     try:
                         page.locator(APPLY_DIALOG).first.wait_for(state="visible", timeout=6000)
@@ -244,6 +306,7 @@ def _apply_one(url):
                 except Exception:
                     pass
             if not dialog_open:
+                recovery_shadow(page, "open_apply_dialog")
                 return (False, "no-dialog")
             # EXTERNAL-MANAGED dialog: "Apply on website" — no form to fill, not a failure
             try:
@@ -439,10 +502,24 @@ def _apply_one(url):
                     df.write(f"\n===== PRE-SUBMIT {time.strftime('%H:%M:%S')} {url} =====\n")
                     for f in page.locator(APPLY_DIALOG + " input, " + APPLY_DIALOG + " textarea, " + APPLY_DIALOG + " select").all():
                         try:
-                            df.write(f"[field] {f.evaluate('el => el.name || el.placeholder || el.type')} = {f.input_value()[:80]}\n")
+                            field_id = f.evaluate("el => el.name || el.type || el.tagName")
+                            df.write(f"[field] {field_id} filled={bool(f.input_value())}\n")
                         except Exception:
                             pass
                     df.write(f"[textareas visible: {page.locator(APPLY_DIALOG + ' textarea:visible').count()}]\n")
+            except Exception:
+                pass
+            # Capture only application-scoped mutation responses, and install
+            # the listener BEFORE clicking submit so the request cannot race us.
+            submit_http = []
+            try:
+                def _on_resp(r):
+                    try:
+                        if r.request.method in ("POST", "PUT") and re.search(r"application|apply|send|candidate", r.url):
+                            submit_http.append((r.status, r.url[:90]))
+                    except Exception:
+                        pass
+                page.on("response", _on_resp)
             except Exception:
                 pass
             # submit
@@ -482,44 +559,26 @@ def _apply_one(url):
                 except Exception:
                     diag = page.inner_text("body")[:180].replace("\n", " | ") if True else "?"
                 return (False, "no-submit-btn|" + diag)
-            # success = POSITIVE signal only: (a) HTTP confirmation (primary —
-            # UI text is fragile), (b) dialog closed, (c) success text fallback.
+            # success = POSITIVE signal only: relevant HTTP 2xx or explicit
+            # confirmation text. Dialog closure alone is never proof.
             success = False
-            submit_http = []
-            try:
-                def _on_resp(r):
-                    try:
-                        if r.request.method in ("POST", "PUT") and re.search(r"application|apply|send|candidate", r.url):
-                            submit_http.append((r.status, r.url[:90]))
-                    except Exception:
-                        pass
-                page.on("response", _on_resp)
-            except Exception:
-                pass
             try:
                 for _ in range(12):
                     page.wait_for_timeout(1000)
-                    # (a) HTTP confirmation — most reliable signal
-                    if any(st in (200, 201, 202, 204) for st, _ in submit_http):
+                    if has_submission_confirmation(
+                        http_statuses=[st for st, _ in submit_http]
+                    ):
                         success = True
                         break
-                    # (b) dialog closed
-                    if page.locator(APPLY_DIALOG).count() == 0:
-                        success = True
-                        break
-                    # (c) success text (the post-submit dialog STAYS OPEN —
-                    #     AI-interview share screen — so text is the fallback)
                     try:
-                        dtxt = page.locator(APPLY_DIALOG).inner_text().lower()
-                        if re.search(r"application (is|was|has been) sent|success! your application|your application has been|application submitted|thanks for applying|applied successfully|you'?ve applied|we received your application|share your ai interview", dtxt):
+                        dtxt = page.locator(APPLY_DIALOG).inner_text() if page.locator(APPLY_DIALOG).count() else ""
+                        if has_submission_confirmation(dtxt):
                             success = True
                             break
                     except Exception:
                         pass
                 if not success:
-                    body = page.inner_text("body").lower()
-                    if re.search(r"application (is|was|has been) sent|success! your application|application submitted|applied successfully|you'?ve applied|thanks for applying|share your ai interview", body):
-                        success = True
+                    success = has_submission_confirmation(page.inner_text("body"))
             except Exception:
                 pass
             if success:
@@ -538,18 +597,20 @@ def _apply_one(url):
             try:
                 with open(os.path.join(HERE, "logs", "wf_submit_fail.log"), "a") as df:
                     df.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} {url} =====\n")
-                    df.write((page.locator(APPLY_DIALOG).inner_text() if page.locator(APPLY_DIALOG).count() else page.inner_text("body"))[:3000])
+                    diagnostic = page.locator(APPLY_DIALOG).inner_text() if page.locator(APPLY_DIALOG).count() else page.inner_text("body")
+                    df.write(safe_diagnostic_text(diagnostic)[:3000])
                     df.write("\n")
                     for f in page.locator(APPLY_DIALOG + " input, " + APPLY_DIALOG + " textarea, " + APPLY_DIALOG + " select").all():
                         try:
-                            df.write(f"[field] {f.evaluate('el => el.name || el.placeholder || el.type')} = {f.input_value()[:60]}\n")
+                            field_id = f.evaluate("el => el.name || el.type || el.tagName")
+                            df.write(f"[field] {field_id} filled={bool(f.input_value())}\n")
                         except Exception:
                             pass
             except Exception:
                 pass
             if "not accepting applications" in err.lower() or "timezone or relocation" in err.lower():
                 return (False, "location-block")
-            return (False, "submit-unconfirmed|" + err[:150].replace("\n", " | "))
+            return (False, "submit-unconfirmed")
         except Exception as e:
             return (False, str(e)[:120])
         finally:

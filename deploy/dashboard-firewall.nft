@@ -1,0 +1,9 @@
+table inet jobhunt_dashboard {
+  chain input {
+    type filter hook input priority -10; policy accept;
+    iifname "lo" tcp dport 8787 counter accept
+    iifname "tailscale0" tcp dport 8787 counter accept
+    ip saddr 172.22.0.0/16 tcp dport 8787 counter accept
+    tcp dport 8787 counter drop
+  }
+}

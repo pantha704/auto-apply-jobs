@@ -1,0 +1,13 @@
+{
+  "fixture_only": true,
+  "adapter": "synthetic-ats",
+  "manifest_version": 1,
+  "url": "https://synthetic-ats.invalid/jobs/fixture-unknown/apply",
+  "company": "Fixture Company",
+  "role": "Fixture Engineer",
+  "questions": ["candidate.name", "fixture.unapproved_question"],
+  "known_answers": ["candidate.name"],
+  "selector_status": "known",
+  "submit_clicked": false,
+  "confirmation": null
+}

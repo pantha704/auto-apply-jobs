@@ -5,11 +5,15 @@ Usage: python3 worker_internshala.py <worker_id>
 Pacing: DAILY_CAP applications/day (default 40), 45-90s between applies.
 """
 import json, os, re, sqlite3, sys, time
+
+from jobhunt_time import ist_day_bounds
+from title_filter import title_rejection_reason
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 from playwright.sync_api import sync_playwright
 import audit
 import dynamic_ui
 import jd_match
+from submission_signals import has_submission_confirmation
 from worker_guard import BrowserWatchdog
 import profile as ident
 
@@ -18,6 +22,9 @@ CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
 PROFILE = os.path.join(HERE, "profiles", "is_login")
 RESUME = os.path.join(HERE, "resume_pratham.pdf")
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "is-w1"
+_worker_match = re.search(r"(\d+)$", WORKER_ID)
+CDP_PORT = int(os.environ.get("IS_CDP_PORT", str(9350 + (int(_worker_match.group(1)) if _worker_match else 1))))
+CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 DAILY_CAP = int(os.environ.get("IS_DAILY_CAP", "40"))
 STEALTH = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
 
@@ -40,15 +47,20 @@ def db():
     return sqlite3.connect(os.path.join(HERE, "apply_queue.db"))
 
 def claim():
-    c = db()
-    row = c.execute("SELECT id, url, title FROM jobs WHERE portal='internshala' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
-    if not row:
-        c.close(); return None
-    upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
-    c.commit(); c.close()
-    if upd.rowcount != 1:
-        return claim()
-    return {"id": row[0], "url": row[1], "title": row[2]}
+    while True:
+        c = db()
+        row = c.execute("SELECT id, url, title FROM jobs WHERE portal='internshala' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
+        if not row:
+            c.close(); return None
+        reason = title_rejection_reason(row[2] or "", "internshala")
+        if reason:
+            c.execute("UPDATE jobs SET status='skip', result=? WHERE id=? AND status='pending'", (reason, row[0]))
+            c.commit(); c.close()
+            continue
+        upd = c.execute("UPDATE jobs SET status='claimed', claimed_by=? WHERE id=? AND status='pending'", (WORKER_ID, row[0]))
+        c.commit(); c.close()
+        if upd.rowcount == 1:
+            return {"id": row[0], "url": row[1], "title": row[2]}
 
 def mark(jid, status, result=""):
     c = db()
@@ -64,10 +76,10 @@ def applied_today():
     # worker believed it had "hit today's cap 40" forever and slept 30m in a loop
     # while applying ZERO on the current day. Today's date partition is the only
     # correct cap signal.
-    n2 = c.execute("SELECT COUNT(*) FROM applications WHERE portal='internshala' AND applied_at LIKE ? AND status='applied'", (time.strftime('%Y-%m-%d') + '%',)).fetchone()[0]
+    start_utc, end_utc = ist_day_bounds()
+    n2 = c.execute("SELECT COUNT(*) FROM applications WHERE portal='internshala' AND applied_at >= ? AND applied_at < ? AND status='applied'", (start_utc, end_utc)).fetchone()[0]
     c.close()
     return n2
-
 def fill_textareas(page, note):
     """Fill employer questions honestly. Returns count filled."""
     fields = page.evaluate("""() => {
@@ -141,7 +153,8 @@ def main():
         ctx = p.chromium.launch_persistent_context(
             user_data_dir=PROFILE, executable_path=CLOAK, headless=True,
             args=["--no-first-run", "--no-default-browser-check",
-                  "--disable-blink-features=AutomationControlled", "--window-size=1400,900"])
+                  "--disable-blink-features=AutomationControlled", "--window-size=1400,900",
+                  "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={CDP_PORT}"])
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.add_init_script(STEALTH)
         page.set_default_timeout(30000)
@@ -182,7 +195,10 @@ def main():
 
                 # Intent-first apply navigation; LLM may only choose a low-risk
                 # candidate from the sanitized actionable-control inventory.
-                clicked = dynamic_ui.click(page, "internshala", "apply", timeout_ms=8000)
+                clicked = dynamic_ui.hybrid_click(
+                    page, "internshala", "apply", CDP_URL,
+                    postcondition=lambda: "/student/resume" in page.url or page.locator("form, textarea, input[type=file]").count() > 0,
+                )
                 if clicked:
                     log("clicked Apply intent")
                 if not clicked:
@@ -195,7 +211,10 @@ def main():
                 if "/student/resume" in page.url:
                     log("resume intermediate page")
                     try:
-                        if not dynamic_ui.click(page, "internshala", "proceed", timeout_ms=8000):
+                        if not dynamic_ui.hybrid_click(
+                            page, "internshala", "proceed", CDP_URL,
+                            postcondition=lambda: "/student/resume" not in page.url,
+                        ):
                             raise RuntimeError("proceed intent failed")
                         log("clicked Proceed to application")
                         page.wait_for_timeout(4000)
@@ -216,8 +235,8 @@ def main():
                 audit.snapshot(page, "internshala", job["id"], "before_submit")
                 ok = submit(page)
                 page.wait_for_timeout(4000)
-                after = page.inner_text("body").lower()
-                if "submitted" in after or "application submitted" in after or "success" in after:
+                after = page.inner_text("body")
+                if has_submission_confirmation(after):
                     mark(job["id"], "done", "applied")
                     audit.record_application("internshala", "", job["title"], job["url"], "applied",
                                              answers=note[:300], resume_used=RESUME)

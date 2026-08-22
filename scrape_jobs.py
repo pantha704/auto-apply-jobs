@@ -141,8 +141,10 @@ def save_checkpoint(all_jobs, stats, done):
     jobs = list(all_jobs.values())
     raw_path = os.path.join(OUT_DIR, f"jobs_raw_{TPR}_india.json")
     with open(raw_path, "w") as f:
+        total_keywords = sum(len(v) for v in KEYWORD_GROUPS.values())
         json.dump({"tpr": TPR, "count": len(jobs), "stats": stats,
-                   "done": sorted(done), "jobs": jobs}, f, indent=1)
+                   "done": sorted(done), "complete": len(done) >= total_keywords,
+                   "saved_at": int(time.time()), "jobs": jobs}, f, indent=1)
 
 
 def main():
@@ -159,6 +161,19 @@ def main():
         except Exception as e:
             print(f"[resume] failed: {e} — starting fresh", flush=True)
             all_jobs, stats, done = {}, {}, set()
+
+    # A completed checkpoint is the end of one search cycle, not a permanent
+    # terminal state. Keep one prior snapshot for diagnosis and begin a clean
+    # cycle so the next cron run performs real network collection.
+    all_keywords = {kw for keywords in KEYWORD_GROUPS.values() for kw in keywords}
+    if all_keywords and all_keywords.issubset(done):
+        previous = raw_path + ".previous"
+        try:
+            os.replace(raw_path, previous)
+        except OSError:
+            pass
+        all_jobs, stats, done = {}, {}, set()
+        print(f"[cycle] prior checkpoint complete ({len(all_keywords)} keywords); starting fresh", flush=True)
 
     session = requests.Session()
     session.headers.update({"Accept-Language": "en-US,en;q=0.9"})
@@ -224,8 +239,7 @@ def main():
     jobs.sort(key=lambda x: (not x["is_remote"], not x["is_kolkata"]))
 
     raw_path = os.path.join(OUT_DIR, f"jobs_raw_{TPR}_india.json")
-    with open(raw_path, "w") as f:
-        json.dump({"tpr": TPR, "count": len(jobs), "stats": stats, "done": sorted(done), "jobs": jobs}, f, indent=1)
+    save_checkpoint(all_jobs, stats, done)
     from collections import Counter
     wt = Counter(j["worktype"] for j in jobs)
     print(f"\nTOTAL UNIQUE: {len(jobs)}  ->  {raw_path}")

@@ -4,21 +4,11 @@ import json, os
 import os, re, sqlite3, sys
 os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
 
+from job_identity import canonical_url as canonical, stable_job_id
 from title_filter import is_tech_title
 
 DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "apply_queue.db")
 
-def canonical(url):
-    if not url: return ""
-    u = url.strip()
-    # strip tracking params
-    u = re.sub(r"(\?|&)(trackingId|refId|trk|utm_[a-z]+|from|position|pageNum|gclid|fbclid|ref)[^&]*", "", u)
-    u = re.sub(r"[?&]+$", "", u)
-    u = u.rstrip("/")
-    # normalize x links
-    if "x.com" in u or "twitter.com" in u:
-        u = re.sub(r"(x\.com|twitter\.com)/[^/]+/status/", "x.com/status/", u)
-    return u
 
 def main():
     if os.path.exists(DB):
@@ -35,14 +25,14 @@ def main():
         for line in open("applications_log.tsv"):
             parts = line.rstrip("\n").split("\t")
             if len(parts) >= 5 and parts[0] != "time":
-                applied.add(parts[4].strip())
+                applied.add(canonical(parts[4]))
 
     def add(portal, url, title, source):
         c = canonical(url)
         if not c or c in jobs: return
         if not is_tech_title(title, source): return
         if c in applied or c.rstrip("/") in {a.rstrip("/") for a in applied}: return
-        jid = f"{source}-{abs(hash(c))}"
+        jid = stable_job_id(source, url)
         jobs[c] = (jid, portal, url, (title or "")[:120], source)
 
     # 1. LinkedIn targets (Kolkata/remote/India from full pool)

@@ -1,0 +1,17 @@
+{
+  "fixture_only": true,
+  "adapter": "synthetic-ats",
+  "manifest_version": 1,
+  "url": "https://synthetic-ats.invalid/jobs/fixture-verified/apply",
+  "company": "Fixture Company",
+  "role": "Fixture Engineer",
+  "questions": ["candidate.email"],
+  "known_answers": ["candidate.email"],
+  "selector_status": "known",
+  "submit_clicked": true,
+  "confirmation": {
+    "url": "https://synthetic-ats.invalid/applications/fixture-verified/confirmation",
+    "success_text": "Application received",
+    "application_id": "fixture-verified"
+  }
+}
