@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from submission_signals import has_submission_confirmation
 
 
@@ -26,3 +28,10 @@ def test_ambiguous_ui_changes_are_not_submission_proof():
 def test_only_scoped_success_http_statuses_are_accepted():
     assert has_submission_confirmation(http_statuses=[201])
     assert not has_submission_confirmation(http_statuses=[302, 400, 500])
+
+
+def test_internshala_records_after_submit_screenshot_on_confirmed_apply():
+    text = Path("/home/ubuntu/job_hunt_linkedin/worker_internshala.py").read_text()
+    assert 'audit.snapshot(page, "internshala", job["id"], "after_submit")' in text
+    assert "snap_after=" in text
+    assert "snap_before=" in text

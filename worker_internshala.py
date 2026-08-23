@@ -300,14 +300,17 @@ def run_once():
                 filled = fill_textareas(page, note)
                 log(f"filled {filled} question(s)")
                 upload_resume(page)
-                audit.snapshot(page, "internshala", job["id"], "before_submit")
+                before_snap = audit.snapshot(page, "internshala", job["id"], "before_submit")
                 ok = submit(page)
                 page.wait_for_timeout(4000)
                 after = page.inner_text("body")
+                after_snap = audit.snapshot(page, "internshala", job["id"], "after_submit")
                 if has_submission_confirmation(after):
                     mark(job["id"], "done", "applied")
                     audit.record_application("internshala", "", job["title"], job["url"], "applied",
-                                             answers=note[:300], resume_used=RESUME)
+                                             answers=note[:300], resume_used=RESUME,
+                                             snap_before=before_snap.get("png"),
+                                             snap_after=after_snap.get("png"))
                     log("APPLIED")
                 elif ok:
                     fails[job["id"]] = fails.get(job["id"], 0) + 1
