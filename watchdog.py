@@ -26,7 +26,8 @@ from workflow.portal_session_runtime import session_manager
 from workflow.session_health import watchdog_session_guidance
 
 HERE = "/home/ubuntu/job_hunt_linkedin"
-DB = os.path.join(HERE, "apply_queue.db")
+DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
+CONTROL_DB = os.getenv("JOBHUNT_CONTROL_DB", os.path.join(HERE, "controlplane.db"))
 STATE_FILE = os.path.join(HERE, ".watchdog_state.json")
 RESTART_FILE = os.path.join(HERE, ".watchdog_restarts.json")
 SPIN_FILE = os.path.join(HERE, ".watchdog_spin.json")
@@ -63,6 +64,19 @@ def alert(key, msg):
         except Exception:
             pass
 
+
+def publication_is_ready():
+    try:
+        with sqlite3.connect(CONTROL_DB) as db:
+            profiles = db.execute(
+                "SELECT COUNT(*) FROM candidate_profiles WHERE status='approved'"
+            ).fetchone()[0]
+            policies = db.execute(
+                "SELECT COUNT(*) FROM preference_sets WHERE status='active'"
+            ).fetchone()[0]
+        return profiles > 0 and policies > 0
+    except Exception:
+        return False
 
 def restart_portal(portal, reason):
     """systemctl restart all units of a portal, cooldown-limited."""
@@ -208,10 +222,11 @@ try:
     if latest:
         latest_dt = datetime.fromisoformat(latest)
         age_min = (now - latest_dt).total_seconds() / 60
-        if age_min > 45:
+        if age_min > 45 and publication_is_ready():
             alert("db_activity", f"no application activity in DB for {age_min:.0f} min")
     else:
-        alert("db_activity", "applications table empty — no audit rows at all")
+        if publication_is_ready():
+            alert("db_activity", "applications table empty — no audit rows at all")
 except Exception as e:
     ALERTS.append(f"db activity check err: {e}")
 
@@ -224,9 +239,9 @@ try:
     if wf_pending_n > 20:
         if last_sub:
             sub_age = (now - datetime.fromisoformat(last_sub)).total_seconds() / 60
-            if sub_age > 90:
+            if sub_age > 90 and publication_is_ready():
                 alert("no_submission", f"no successful submission in {sub_age:.0f} min with {wf_pending_n} wellfound pending — workers may be skipping junk")
-        else:
+        elif publication_is_ready():
             alert("no_submission", f"zero successful submissions ever, {wf_pending_n} wellfound pending")
 except Exception as e:
     ALERTS.append(f"submission check err: {e}")
@@ -257,7 +272,7 @@ try:
     if guidance:
         alert("linkedin_session", guidance)
 except Exception:
-    ALERTS.append("linkedin canonical session health unavailable")
+    alert("linkedin_session_unavail", "linkedin canonical session health unavailable")
 
 # ---- 6. scraper cron/content health ----
 try:
@@ -321,7 +336,7 @@ try:
         ((now - timedelta(hours=2)).isoformat(),)).fetchone()[0]
     pend = c.execute("SELECT COUNT(*) FROM jobs WHERE status='pending' AND portal IN ('wellfound','yc','internshala')").fetchone()[0]
     c.close()
-    if subs_2h == 0 and pend > 10:
+    if subs_2h == 0 and pend > 10 and publication_is_ready():
         alert("rate_floor", f"ZERO submissions in 2h with {pend} pending — workers alive but flow broken (detector/fill regression?)")
 except Exception as e:
     ALERTS.append(f"rate floor err: {e}")

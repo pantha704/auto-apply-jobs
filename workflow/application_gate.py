@@ -9,7 +9,7 @@ from typing import Any, Iterable, Mapping
 from cryptography.fernet import Fernet
 
 from .portal_session_runtime import PortalSessionUnavailable, current_session
-from .preferences import PreferenceEvaluation, PreferenceRepository, PreferenceSet, evaluate_preferences
+from .preferences import PreferenceEvaluation, PreferenceRepository, PreferenceSet, evaluate_preferences, extract_monthly_pay_inr
 from .profile_service import ProfileService
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -127,5 +127,10 @@ def pin_claim(
 
 
 def eligible_for_claim(runtime: PublishedApplicationRuntime, job: Mapping[str, Any]) -> bool:
-    result = runtime.evaluate(job)
+    enriched = dict(job)
+    if enriched.get("salary_min") in (None, ""):
+        pay = extract_monthly_pay_inr(str(enriched.get("title") or ""))
+        if pay is not None:
+            enriched["salary_min"] = pay
+    result = runtime.evaluate(enriched)
     return result.eligible and not result.needs_review

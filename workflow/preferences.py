@@ -14,6 +14,22 @@ from typing import Any
 _MISSING = object()
 _VALID_MODES = {"hard", "soft", "none"}
 _VALID_UNKNOWN = {"block", "review", "ignore"}
+_MONTHLY_INR = re.compile(
+    r"(?:₹|rs\.?|inr)?\s*(\d{1,2}(?:,\d{3})+|\d{4,7}|\d{1,3}\s*k)\s*(?:/|-|\s)*\s*(?:per\s+)?(?:month|mo\.?|p\.?m\.?)",
+    re.I,
+)
+
+
+def extract_monthly_pay_inr(text: str | None) -> int | None:
+    if not text:
+        return None
+    match = _MONTHLY_INR.search(text)
+    if not match:
+        return None
+    raw = match.group(1).lower().replace(",", "").replace(" ", "")
+    if raw.endswith("k"):
+        return int(float(raw[:-1]) * 1000)
+    return int(raw)
 
 
 @dataclass(frozen=True)

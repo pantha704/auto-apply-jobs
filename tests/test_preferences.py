@@ -12,6 +12,15 @@ from workflow.preferences import (
 from workflow.schema import migrate_control
 
 
+def test_monthly_inr_pay_is_extracted_from_titles():
+    from workflow.preferences import extract_monthly_pay_inr
+
+    assert extract_monthly_pay_inr("Backend Intern - 35000/month - Remote") == 35000
+    assert extract_monthly_pay_inr("Stipend ₹30,000 / month") == 30000
+    assert extract_monthly_pay_inr("25k/month internship") == 25000
+    assert extract_monthly_pay_inr("No pay listed") is None
+
+
 def test_hard_mismatch_excludes_and_trace_is_ordered():
     preferences = PreferenceSet(
         id="set-2",
