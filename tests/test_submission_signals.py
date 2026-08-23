@@ -32,6 +32,5 @@ def test_only_scoped_success_http_statuses_are_accepted():
 
 def test_internshala_records_after_submit_screenshot_on_confirmed_apply():
     text = Path("/home/ubuntu/job_hunt_linkedin/worker_internshala.py").read_text()
-    assert 'audit.snapshot(page, "internshala", job["id"], "after_submit")' in text
-    assert "snap_after=" in text
-    assert "snap_before=" in text
+    assert "record_submission_proof(" in text
+    assert 'status_if_confirmed="applied"' in text

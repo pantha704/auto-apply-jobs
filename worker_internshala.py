@@ -302,25 +302,7 @@ def run_once():
                 upload_resume(page)
                 before_snap = audit.snapshot(page, "internshala", job["id"], "before_submit")
                 ok = submit(page)
-                page.wait_for_timeout(4000)
-                after = page.inner_text("body")
-                after_snap = audit.snapshot(page, "internshala", job["id"], "after_submit")
-                if has_submission_confirmation(after):
-                    mark(job["id"], "done", "applied")
-                    audit.record_application("internshala", "", job["title"], job["url"], "applied",
-                                             answers=note[:300], resume_used=RESUME,
-                                             snap_before=before_snap.get("png"),
-                                             snap_after=after_snap.get("png"))
-                    log("APPLIED")
-                elif ok:
-                    fails[job["id"]] = fails.get(job["id"], 0) + 1
-                    if fails[job["id"]] >= 2:
-                        mark(job["id"], "skip", "submit-unconfirmed")
-                        log("skip: submit unconfirmed after retries")
-                    else:
-                        mark(job["id"], "pending", "submit-unconfirmed")
-                        log("submit clicked but confirmation missing; requeued")
-                else:
+                if not ok:
                     fails[job["id"]] = fails.get(job["id"], 0) + 1
                     if fails[job["id"]] >= 2:
                         mark(job["id"], "skip", "apply-flow-fail")
@@ -329,6 +311,30 @@ def run_once():
                         mark(job["id"], "pending")
                         log("no submit button — reverted to pending")
                     continue
+                page.wait_for_timeout(4000)
+                proof = audit.record_submission_proof(
+                    page,
+                    portal="internshala",
+                    job_id=job["id"],
+                    company="",
+                    role=job["title"],
+                    url=job["url"],
+                    status_if_confirmed="applied",
+                    resume_used=RESUME,
+                    answers=note[:300],
+                    already_before=before_snap,
+                )
+                if proof.confirmed:
+                    mark(job["id"], "done", "applied")
+                    log("APPLIED")
+                else:
+                    fails[job["id"]] = fails.get(job["id"], 0) + 1
+                    if fails[job["id"]] >= 2:
+                        mark(job["id"], "skip", "submit-unconfirmed")
+                        log("skip: submit unconfirmed after retries")
+                    else:
+                        mark(job["id"], "pending", "submit-unconfirmed")
+                        log("submit clicked but confirmation missing; requeued")
             except Exception as e:
                 log(f"error on {job['title'][:40]}: {e}")
                 fails[job["id"]] = fails.get(job["id"], 0) + 1

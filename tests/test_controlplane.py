@@ -166,8 +166,12 @@ def test_application_history_is_paginated_and_redacted(dashboard):
     body = response.json()
     assert body["total"] == 1
     assert body["items"][0]["status"] == "submitted"
+    assert body["items"][0]["has_after_proof"] is False
+    assert body["items"][0]["proof_class"] == "text-only"
     assert "answers" not in body["items"][0]
-    assert {"url", "note", "resume_used"}.isdisjoint(body["items"][0])
+    assert {"url", "note", "resume_used", "snap_after"}.isdisjoint(body["items"][0])
+    missing = client.get("/api/applications/1/proof")
+    assert missing.status_code == 404
 
 
 def test_readiness_blocks_when_no_site_is_enabled(dashboard):

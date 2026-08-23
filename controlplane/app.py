@@ -1048,18 +1048,54 @@ def applications(
             params,
         ).fetchone()[0]
         rows = db.execute(
-            """SELECT id,portal,company,role,applied_at,status
+            """SELECT id,portal,company,role,applied_at,status,snap_after
             FROM applications
             WHERE (? IS NULL OR portal=?) AND (? IS NULL OR status=?)
             ORDER BY applied_at DESC LIMIT ? OFFSET ?""",
             (*params, limit, offset),
         ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        after = item.pop("snap_after", None)
+        has_proof = bool(after and Path(after).is_file() and Path(after).stat().st_size > 0)
+        item["has_after_proof"] = has_proof
+        if item["status"] in {"applied", "submitted"}:
+            item["proof_class"] = "after-screenshot" if has_proof else "text-only"
+        else:
+            item["proof_class"] = "unconfirmed"
+        items.append(item)
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
-        "items": [dict(row) for row in rows],
+        "items": items,
     }
+
+
+def _audit_png(path_text: str) -> Path:
+    path = Path(path_text).resolve()
+    roots = [
+        Path(os.getenv("JOBHUNT_AUDIT_DIR", ROOT / "audits")).resolve(),
+        (ROOT / "audits").resolve(),
+    ]
+    if path.suffix.lower() != ".png" or not path.is_file() or path.stat().st_size <= 0:
+        raise HTTPException(404, "proof not available")
+    if not any(path == root or root in path.parents for root in roots):
+        raise HTTPException(404, "proof not available")
+    return path
+
+
+@app.get("/api/applications/{application_id}/proof")
+def application_proof(application_id: int) -> FileResponse:
+    with connect(settings().queue_db, readonly=True) as db:
+        row = db.execute(
+            "SELECT snap_after,status FROM applications WHERE id=?",
+            (application_id,),
+        ).fetchone()
+    if row is None or not row["snap_after"]:
+        raise HTTPException(404, "proof not available")
+    return FileResponse(_audit_png(row["snap_after"]), media_type="image/png")
 
 
 @app.get("/api/issues")

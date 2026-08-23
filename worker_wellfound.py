@@ -636,7 +636,10 @@ def _apply_one(url, expected_session_revision=None):
                 try:
                     SNAPS["after"] = audit.snapshot(page, "wellfound", url, "after")
                 except Exception:
-                    pass
+                    SNAPS["after"] = {"png": None}
+                after_png = (SNAPS.get("after") or {}).get("png")
+                if not (after_png and os.path.isfile(after_png) and os.path.getsize(after_png) > 0):
+                    return (False, "submit-unconfirmed")
                 return (True, "submitted")
             # not positively confirmed -> capture the actual dialog state as failure
             err = ""

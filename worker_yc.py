@@ -195,16 +195,27 @@ def apply_job(page, job):
     except Exception:
         pass
     # Send
+    before = audit.snapshot(page, "yc", job.get("id") or job.get("url"), "before_submit")
     if not dynamic_ui.click(page, "yc", "send", timeout_ms=5000):
         return ("skip", "no-send-button", "")
 
     page.wait_for_timeout(4000)
-    try:
-        after = page.inner_text("body")[:3000]
-        if has_submission_confirmation(after, submit_http):
-            return ("submitted", "sent", note)
-    except Exception:
-        pass
+    proof = audit.record_submission_proof(
+        page,
+        portal="yc",
+        job_id=str(job.get("id") or job.get("url") or "yc"),
+        company="",
+        role=str(job.get("title") or ""),
+        url=str(job.get("url") or ""),
+        status_if_confirmed="submitted",
+        resume_used=RESUME,
+        answers={"note": note[:400]},
+        http_statuses=submit_http,
+        already_before=before,
+        note="sent",
+    )
+    if proof.confirmed:
+        return ("submitted", "sent", note)
     return ("skip", "send-unconfirmed", "")
 
 def _open_runtime_context(playwright, expected_session_revision=None):

@@ -19,6 +19,7 @@ from workflow.application_gate import (
     published_runtime,
 )
 import jd_match
+from submission_signals import has_submission_confirmation
 from title_filter import title_rejection_reason
 from worker_guard import BrowserWatchdog
 
@@ -26,6 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
 CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
 RESUME = ""
+LAST_SNAPS = {"before": None, "after": None}
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "li-w1"
 STATE_ROOT = os.getenv("JOBHUNT_STATE_ROOT", os.path.join(HERE, "state_queue"))
 _worker_match = re.search(r"(\d+)$", WORKER_ID)
@@ -280,7 +282,9 @@ def main():
                 portal="linkedin", company=job.get("company") or "(linkedin)", role=job["title"],
                 url=job["url"], status="submitted" if ok[0] else f"skipped:{ok[1][:60]}",
                 answers=getattr(apply_job, "last_answers", None),
-                resume_used=os.path.basename(RESUME), note=ok[1][:200])
+                resume_used=os.path.basename(RESUME), note=ok[1][:200],
+                snap_before=(LAST_SNAPS.get("before") or {}).get("png"),
+                snap_after=(LAST_SNAPS.get("after") or {}).get("png"))
             log(f"{'DONE' if ok[0] else 'SKIP'}: {job['title'][:50]} ({ok[1][:60]})")
         except Exception as e:
             mark(job["id"], "error", str(e)[:150])
@@ -362,19 +366,20 @@ def apply_job(url, expected_session_revision=None):
                 }""")
                 page.wait_for_timeout(800)
                 try:
-                    audit.snapshot(page, "linkedin", url, "before")
+                    LAST_SNAPS["before"] = audit.snapshot(page, "linkedin", url, "before")
                 except Exception:
-                    pass
+                    LAST_SNAPS["before"] = {"png": None}
                 if not dynamic_ui.click(page, "linkedin", "submit", timeout_ms=8000):
                     return (False, "submit-intent-failed")
                 page.wait_for_timeout(3500)
                 try:
-                    audit.snapshot(page, "linkedin", url, "after")
+                    LAST_SNAPS["after"] = audit.snapshot(page, "linkedin", url, "after")
                 except Exception:
-                    pass
+                    LAST_SNAPS["after"] = {"png": None}
                 body = page.inner_text("body")
-                ok = bool(re.search(r"Application submitted|Your application was sent", body, re.I))
-                return (ok, "single-page-submitted" if ok else "single-page-uncertain|" + body[:120].replace("\n", " | "))
+                png = (LAST_SNAPS.get("after") or {}).get("png")
+                ok = has_submission_confirmation(body) and bool(png and os.path.isfile(png) and os.path.getsize(png) > 0)
+                return (ok, "single-page-submitted" if ok else "single-page-uncertain")
             # multi-page: fill phone + address, then advance
             # page 1: contact — fill phone if empty
             try:
@@ -473,18 +478,19 @@ def apply_job(url, expected_session_revision=None):
                     diag = "?"
                 return (False, "no-submit-btn|" + diag)
             try:
-                audit.snapshot(page, "linkedin", url, "before")
+                LAST_SNAPS["before"] = audit.snapshot(page, "linkedin", url, "before")
             except Exception:
-                pass
+                LAST_SNAPS["before"] = {"png": None}
             page.wait_for_timeout(4000)
             try:
-                audit.snapshot(page, "linkedin", url, "after")
+                LAST_SNAPS["after"] = audit.snapshot(page, "linkedin", url, "after")
             except Exception:
-                pass
+                LAST_SNAPS["after"] = {"png": None}
             body = page.inner_text("body")
-            if re.search(r"Application submitted|Your application was sent", body, re.I):
+            png = (LAST_SNAPS.get("after") or {}).get("png")
+            if has_submission_confirmation(body) and png and os.path.isfile(png) and os.path.getsize(png) > 0:
                 return (True, "submitted")
-            return (False, "submit-uncertain|" + body[:150].replace("\n", " | "))
+            return (False, "submit-uncertain")
         except Exception as e:
             return (False, str(e)[:100])
         finally:
