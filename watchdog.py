@@ -306,8 +306,7 @@ try:
         return (now - max(stamps)).total_seconds() / 3600 if stamps else None
 
     for fname, max_file_age_h, max_post_age_h, label, key in [
-        ("jobs_raw_r3600_india.json", 2.0, 3.0, "fresh-1h LinkedIn", "cron_li_1h"),
-        ("jobs_raw_r86400_india.json", 7.0, 26.0, "fresh-24h LinkedIn", "cron_li_24h"),
+        ("jobs_raw_r86400_india.json", 2.0, 26.0, "fresh-24h LinkedIn hourly", "cron_li_24h"),
         ("/tmp/wellfound_fresh.json", 13.0, 31 * 24.0, "Wellfound fresh", "cron_wf_fresh"),
         ("/tmp/site_collect.json", 13.0, None, "site refill", "cron_site_refill"),
     ]:
