@@ -123,6 +123,42 @@ class ProfileService:
                 raise
         return resume_id
 
+    def onboard_resume(self, original_name: str, data: bytes, media_type: str | None = None) -> dict[str, Any]:
+        resume_id = self.upload_resume(original_name, data, media_type)
+        facts = self.parse_resume(resume_id)
+        return {
+            "id": resume_id,
+            "parse_status": "parsed",
+            "suggestions": {f"{fact['namespace']}.{fact['field']}": fact["value"] for fact in facts},
+        }
+
+    def confirm_resume_for_applications(self, resume_id: str, confirmed_facts: Mapping[str, Any] | None = None) -> None:
+        record = self.get_resume(resume_id)
+        if record["parse_status"] == "pending":
+            self.parse_resume(resume_id)
+            record = self.get_resume(resume_id)
+        if record["parse_status"] == "approved":
+            return
+        if record["parse_status"] != "parsed":
+            raise ValueError("resume cannot be confirmed for applications")
+        confirmed = confirmed_facts or {}
+        for fact in self.list_parse_facts(resume_id):
+            if fact.get("user_action") != "pending":
+                continue
+            key = f"{fact['namespace']}.{fact['field']}"
+            if key in confirmed:
+                if confirmed[key] != fact["value"]:
+                    self.review_parse_fact(fact["id"], "edited", confirmed[key])
+                else:
+                    self.review_parse_fact(fact["id"], "accepted")
+            else:
+                self.review_parse_fact(fact["id"], "rejected")
+        with self._connect() as db:
+            db.execute(
+                "UPDATE resume_versions SET parse_status='approved',approved_at=? WHERE id=?",
+                (_now(), resume_id),
+            )
+
     def get_resume(self, resume_id: str) -> dict[str, Any]:
         with self._connect() as db:
             row = db.execute("SELECT * FROM resume_versions WHERE id=?", (resume_id,)).fetchone()

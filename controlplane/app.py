@@ -1533,6 +1533,13 @@ def workflow_candidate() -> dict:
 def create_workflow_profile(item: ProfileDraftInput) -> dict:
     _require_workflow()
     profile_id = _profile_service().create_profile(item.facts, source_resume_version_id=item.source_resume_version_id)
+    if item.source_resume_version_id:
+        try:
+            _profile_service().confirm_resume_for_applications(item.source_resume_version_id, item.facts)
+        except KeyError as exc:
+            raise HTTPException(404, "resume not found") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
     return {"id": profile_id, "status": "draft"}
 
 
@@ -1562,6 +1569,20 @@ def workflow_resumes() -> dict:
     with connect(settings().control_db, readonly=True) as db:
         rows = db.execute("SELECT id,original_name,media_type,size_bytes,parse_status,parser_name,parser_version,created_at,parsed_at,approved_at,supersedes_id,safe_error FROM resume_versions ORDER BY created_at DESC").fetchall()
     return {"available": True, "items": [dict(row) for row in rows]}
+
+
+@app.post("/api/workflow/resumes/onboard", status_code=201)
+async def onboard_workflow_resume(request: Request) -> dict:
+    _require_workflow()
+    limit = 5 * 1024 * 1024
+    try:
+        body = await request.body()
+        if len(body) > limit + 64 * 1024:
+            raise ValueError(f"multipart request exceeds {limit} byte file limit")
+        filename, media_type, data = _multipart_file(request.headers.get("content-type", ""), body)
+        return _profile_service().onboard_resume(filename, data, media_type)
+    except (UnicodeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 def _multipart_file(content_type: str, body: bytes) -> tuple[str, str | None, bytes]:

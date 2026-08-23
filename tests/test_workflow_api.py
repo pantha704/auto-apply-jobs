@@ -107,6 +107,50 @@ def test_private_resume_upload_list_parse_and_review(workflow_api):
     assert bad.status_code == 422
 
 
+def test_candidate_onboard_returns_suggestions_and_save_approves_resume_file(workflow_api):
+    client, _, _, _ = workflow_api
+    payload = _docx("Ada Lovelace ada@example.test +1 212 555 0100 https://www.linkedin.com/in/ada")
+    uploaded = client.post(
+        "/api/workflow/resumes/onboard",
+        files={"file": ("resume.docx", payload, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert uploaded.status_code == 201
+    body = uploaded.json()
+    assert body["parse_status"] == "parsed"
+    assert body["suggestions"]["contact.email"] == "ada@example.test"
+    assert "contact.phone" in body["suggestions"]
+    assert body["suggestions"]["links.linkedin"] == "https://www.linkedin.com/in/ada"
+    resume_id = body["id"]
+
+    saved = client.post(
+        "/api/workflow/profiles",
+        json={
+            "facts": {
+                "identity.full_name": "Ada Lovelace",
+                "contact.email": "ada@example.test",
+                "contact.phone": body["suggestions"]["contact.phone"],
+            },
+            "source_resume_version_id": resume_id,
+        },
+    )
+    assert saved.status_code == 201
+    listing = client.get("/api/workflow/resumes").json()["items"]
+    assert listing[0]["id"] == resume_id
+    assert listing[0]["parse_status"] == "approved"
+    readiness = client.get("/api/workflow/readiness").json()
+    assert readiness["approved_resume_id"] == resume_id
+    assert readiness["approved_profile_id"] is None
+
+
+def test_candidate_page_has_inline_resume_onboard_and_review_prompt(workflow_api):
+    client, _, _, _ = workflow_api
+    page = client.get("/").text
+    script = client.get("/static/app.js").text
+    assert 'id="candidate-resume-form"' in page or "candidate-resume-form" in script
+    assert "/api/workflow/resumes/onboard" in script
+    assert "Check the extracted details, then save" in script
+
+
 def test_preferences_answers_tasks_and_trace_are_safe(workflow_api):
     client, queue, control, _ = workflow_api
     preference = client.post("/api/workflow/preferences", json={"version": 1, "rules": [{"criterion": "location", "mode": "hard", "operator": "eq", "expected": "remote"}]})
