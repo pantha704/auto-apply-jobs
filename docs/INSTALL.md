@@ -101,7 +101,7 @@ python jobhunt_farm.py resume
 python jobhunt_farm.py shutdown # workers + dashboard + session probes
 ```
 
-Dashboard top bar also has **Pause farm**, **Resume farm**, and **Shutdown**. Dashboard stays up on pause. Shutdown closes the dashboard too.
+Dashboard top bar also has **Pause farm**, **Resume farm**, and **Shutdown**. Dashboard stays up on pause. Shutdown closes the dashboard too. Pause/shutdown **never delete** portal sessions, browser profiles, or queue DBs.
 
 ## Agent docs
 

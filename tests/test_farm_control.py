@@ -35,3 +35,20 @@ def test_farm_cli_status_does_not_need_sudo(tmp_path, monkeypatch):
     from workflow import farm_ops
     data = farm_ops.status()
     assert data["paused"] is False
+
+
+def test_pause_does_not_delete_session_bundle(tmp_path, monkeypatch):
+    store = tmp_path / "sessions" / "linkedin"
+    store.mkdir(parents=True)
+    bundle = store / "session-r1.enc"
+    bundle.write_bytes(b"keep-me")
+    before = bundle.read_bytes()
+    monkeypatch.setenv("JOBHUNT_SESSION_STORAGE", str(tmp_path / "sessions"))
+    monkeypatch.setenv("JOBHUNT_PAUSE_FLAG", str(tmp_path / "FARM_PAUSED"))
+    monkeypatch.setattr("workflow.farm_ops._systemctl", lambda action, unit: action)
+    monkeypatch.setattr("workflow.farm_ops.unit_active", lambda unit: "inactive")
+    from workflow import farm_ops
+    result = farm_ops.pause("test")
+    assert result["sessions_preserved"]["intact"] is True
+    assert bundle.read_bytes() == before
+    assert bundle.exists()

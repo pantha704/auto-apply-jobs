@@ -7,6 +7,7 @@ import threading
 from datetime import datetime, timezone
 
 from workflow.farm_control import clear_paused, is_paused, pause_reason, write_paused
+from workflow.session_preserve import assert_intact, snapshot
 
 APPLY_UNITS = (
     "jobhunt-is@is-w1.service",
@@ -65,10 +66,19 @@ def status() -> dict:
 
 
 def pause(reason: str | None = None) -> dict:
+    before = snapshot()
     stamp = datetime.now(timezone.utc).isoformat()
     path = write_paused(reason or f"paused at {stamp} UTC")
     units = {unit: _systemctl("stop", unit) for unit in APPLY_UNITS}
-    return {"ok": True, "action": "pause", "flag": str(path), **status(), "unit_results": units}
+    preserved = assert_intact(before)
+    return {
+        "ok": True,
+        "action": "pause",
+        "flag": str(path),
+        "sessions_preserved": preserved,
+        **status(),
+        "unit_results": units,
+    }
 
 
 def resume() -> dict:
@@ -78,6 +88,7 @@ def resume() -> dict:
 
 
 def shutdown() -> dict:
+    before = snapshot()
     paused = pause("shutdown at operator request")
     extras = {unit: _systemctl("stop", unit) for unit in SHUTDOWN_UNITS if unit != "jobhunt-dashboard.service"}
     delay = float(os.getenv("JOBHUNT_DASHBOARD_SHUTDOWN_DELAY", "2"))
@@ -90,4 +101,5 @@ def shutdown() -> dict:
     else:
         extras["jobhunt-dashboard.service"] = f"scheduled {delay:.0f}s"
         threading.Timer(delay, _stop_dashboard).start()
-    return {**paused, "action": "shutdown", "extra_results": extras}
+    preserved = assert_intact(before)
+    return {**paused, "action": "shutdown", "extra_results": extras, "sessions_preserved": preserved}
