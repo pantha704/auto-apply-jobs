@@ -23,6 +23,17 @@ Cmnd_Alias JOBHUNT_DASHBOARD_WORKERS = \
   /usr/bin/systemctl restart jobhunt-ext@w1.service, \
   /usr/bin/systemctl start jobhunt-review@r1.service, \
   /usr/bin/systemctl stop jobhunt-review@r1.service, \
-  /usr/bin/systemctl restart jobhunt-review@r1.service
+  /usr/bin/systemctl restart jobhunt-review@r1.service, \
+  /usr/bin/systemctl start jobhunt-email@w1.service, \
+  /usr/bin/systemctl stop jobhunt-email@w1.service, \
+  /usr/bin/systemctl restart jobhunt-email@w1.service, \
+  /usr/bin/systemctl stop jobhunt-dashboard.service, \
+  /usr/bin/systemctl start jobhunt-dashboard.service, \
+  /usr/bin/systemctl stop jobhunt-session-probe.service, \
+  /usr/bin/systemctl start jobhunt-session-probe.service, \
+  /usr/bin/systemctl stop jobhunt-session-probe.timer, \
+  /usr/bin/systemctl start jobhunt-session-probe.timer, \
+  /usr/bin/systemctl stop jobhunt-li-renew.service, \
+  /usr/bin/systemctl start jobhunt-li-renew.service
 
 ubuntu ALL=(root) NOPASSWD: JOBHUNT_DASHBOARD_WORKERS

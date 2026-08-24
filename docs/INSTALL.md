@@ -96,11 +96,12 @@ Not required for a laptop clone.
 
 ```bash
 python jobhunt_farm.py status
-python jobhunt_farm.py pause    # stop+disable apply workers; harvest/watchdog go silent
+python jobhunt_farm.py pause    # stop apply workers; harvest/watchdog go silent
 python jobhunt_farm.py resume
+python jobhunt_farm.py shutdown # workers + dashboard + session probes
 ```
 
-Dashboard stays up. Queue, sessions, and proof files are not deleted.
+Dashboard top bar also has **Pause farm**, **Resume farm**, and **Shutdown**. Dashboard stays up on pause. Shutdown closes the dashboard too.
 
 ## Agent docs
 

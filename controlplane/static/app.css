@@ -4,3 +4,6 @@
 @media(max-width:760px){.shell{display:block}.sidebar{position:fixed;left:-250px;width:238px;transition:left .2s;box-shadow:10px 0 40px rgba(0,0,0,.4)}.sidebar.open{left:0}.scrim.show{display:block;position:fixed;inset:0;background:rgba(0,0,0,.58);z-index:15}.nav-close,#mobile-menu{display:block}.nav-close{margin-left:auto}.topbar{padding:0 16px;height:72px}.top-actions .mono{display:none}.page{padding:20px 16px 45px}.range-toolbar{display:block}.date-range{margin-top:12px;flex-wrap:wrap}.detail-grid,.check-grid{grid-template-columns:1fr}.donut-wrap{grid-template-columns:1fr}.section-actions{display:block}.form-grid{grid-template-columns:1fr}.workflow-form label.wide{grid-column:auto}}
 @media(max-width:480px){.metric-grid{grid-template-columns:1fr}.metric{min-height:102px}.topbar h1{font-size:19px}.segmented{display:grid;grid-template-columns:repeat(4,1fr)}.segmented button{padding:7px 8px}.top-actions .btn{padding:6px 9px}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+.btn.danger{background:rgba(239,98,98,.16);border-color:rgba(239,98,98,.45);color:#ffb4b4}
+.btn.danger:hover{background:rgba(239,98,98,.28)}
+.btn:disabled{opacity:.45;cursor:not-allowed}

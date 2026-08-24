@@ -101,6 +101,10 @@ Production keeps the authoritative queue under `/var/lib/jobhunt`. Legacy worker
 | GET | `/api/workflow/sessions/{portal}` | One portal's privacy-safe canonical metadata |
 | GET | `/api/workers/{unit}/history` | Retained uptime/resource samples |
 | POST | `/api/workers/{unit}/{action}` | Exact allowlist; `start`, `stop`, `restart` |
+| GET | `/api/farm` | Farm pause flag + unit states |
+| POST | `/api/farm/pause` | Stop apply workers; harvest/watchdog no-op |
+| POST | `/api/farm/resume` | Clear pause flag and start apply workers |
+| POST | `/api/farm/shutdown` | Pause workers, then stop dashboard + session probes |
 | GET | `/api/issues` | Setup blockers and operational skip groups |
 | GET | `/api/applications` | Paginated redacted history |
 

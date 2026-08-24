@@ -40,7 +40,14 @@
     <header class="topbar">
       <button id="mobile-menu" class="icon-btn" aria-label="Open navigation" aria-expanded="false">☰</button>
       <div><p class="eyebrow" id="page-kicker">CONTROL PLANE</p><h1 id="page-title">Overview</h1></div>
-      <div class="top-actions"><span id="last-refresh" class="muted mono" aria-live="polite"></span><button class="btn" id="refresh">Refresh</button></div>
+      <div class="top-actions">
+        <span id="last-refresh" class="muted mono" aria-live="polite"></span>
+        <span id="farm-state" class="muted mono">Farm …</span>
+        <button class="btn" id="farm-pause" type="button">Pause farm</button>
+        <button class="btn" id="farm-resume" type="button">Resume farm</button>
+        <button class="btn danger" id="farm-shutdown" type="button">Shutdown</button>
+        <button class="btn" id="refresh">Refresh</button>
+      </div>
     </header>
 
     <section id="page-overview" class="page active" aria-labelledby="page-title">

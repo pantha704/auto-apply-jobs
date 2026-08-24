@@ -313,6 +313,23 @@ def test_spa_exposes_history_issues_and_site_form():
     assert "/api/applications" in js
     assert "/api/issues" in js
     assert "/api/sites" in js
+    assert 'id="farm-pause"' in html
+    assert 'id="farm-shutdown"' in html
+    assert "/api/farm/" in js
+
+
+def test_farm_status_and_unknown_action(dashboard, tmp_path, monkeypatch):
+    client, _, _ = dashboard
+    monkeypatch.setenv("JOBHUNT_PAUSE_FLAG", str(tmp_path / "FARM_PAUSED"))
+    monkeypatch.setenv("JOBHUNT_DASHBOARD_SHUTDOWN_DELAY", "0")
+    monkeypatch.setattr("workflow.farm_ops._systemctl", lambda action, unit: action)
+    monkeypatch.setattr("workflow.farm_ops.unit_active", lambda unit: "inactive")
+    assert client.get("/api/farm").status_code == 200
+    assert client.post("/api/farm/explode", headers={"X-Jobhunt-CSRF": "1"}).status_code == 404
+    paused = client.post("/api/farm/pause", headers={"X-Jobhunt-CSRF": "1"})
+    assert paused.status_code == 200
+    assert paused.json()["paused"] is True
+    assert client.post("/api/farm/shutdown", headers={"X-Jobhunt-CSRF": "1"}).status_code == 200
 
 
 def test_initialize_applies_control_v2(dashboard):

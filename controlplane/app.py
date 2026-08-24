@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from discovery.ingest import apply_batch
 from workflow.schema import migrate_control
+from workflow import farm_ops
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = Path(__file__).resolve().parent / "static"
@@ -1032,6 +1033,22 @@ def worker_action(unit: str, action: str) -> dict:
     if result.returncode:
         raise HTTPException(503, (result.stderr or "worker action failed")[:300])
     return {"ok": True, "unit": unit, "action": action}
+
+
+@app.get("/api/farm")
+def farm_status() -> dict:
+    return farm_ops.status()
+
+
+@app.post("/api/farm/{action}")
+def farm_action(action: str) -> dict:
+    if action not in {"pause", "resume", "shutdown"}:
+        raise HTTPException(404, "unknown farm action")
+    if action == "pause":
+        return farm_ops.pause()
+    if action == "resume":
+        return farm_ops.resume()
+    return farm_ops.shutdown()
 
 
 @app.get("/api/applications")

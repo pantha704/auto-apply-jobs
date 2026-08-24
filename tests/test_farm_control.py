@@ -30,9 +30,8 @@ def test_watchdog_is_silent_when_paused(tmp_path, monkeypatch):
 
 
 def test_farm_cli_status_does_not_need_sudo(tmp_path, monkeypatch):
-    import jobhunt_farm
     monkeypatch.setenv("JOBHUNT_PAUSE_FLAG", str(tmp_path / "FARM_PAUSED"))
-    import importlib
-    import workflow.farm_control as fc
-    importlib.reload(fc)
-    assert jobhunt_farm.cmd_status() == 0
+    monkeypatch.setattr("workflow.farm_ops.unit_active", lambda unit: "inactive")
+    from workflow import farm_ops
+    data = farm_ops.status()
+    assert data["paused"] is False
