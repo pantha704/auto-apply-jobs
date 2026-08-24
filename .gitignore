@@ -43,6 +43,7 @@ learned/agent_inbox/
 controlplane.db
 applications.db
 .private/
+.farm_paused
 *.previous
 *.pre-*
 .controlplane.key

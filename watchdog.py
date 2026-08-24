@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone, timedelta
+from workflow.farm_control import is_paused
 from workflow.portal_session_runtime import session_manager
 from workflow.session_health import watchdog_session_guidance
 
@@ -34,6 +35,8 @@ SPIN_FILE = os.path.join(HERE, ".watchdog_spin.json")
 
 now = datetime.now(timezone.utc)
 ALERTS = []
+if is_paused():
+    sys.exit(0)
 COOLDOWN_MIN = 360  # each alert category fires at most once per 6 hours
 RESTART_COOLDOWN = 1200  # per-portal auto-restart cooldown (20 min)
 SPIN_WINDOW = 900  # spin samples considered "consecutive" within 15 min

@@ -2,6 +2,8 @@
 # Hourly LinkedIn collection/injection for the last 24h window.
 # Silent only on a successful no-op.
 set -uo pipefail
+# shellcheck source=/dev/null
+. /home/ubuntu/job_hunt_linkedin/farm_guard.sh
 export TMPDIR=/home/ubuntu/tmp_chrome
 export JOBHUNT_QUEUE_DB=/var/lib/jobhunt/apply_queue.db
 cd /home/ubuntu/job_hunt_linkedin || exit 1

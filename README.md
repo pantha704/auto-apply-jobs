@@ -59,17 +59,15 @@ The deployed workers currently use Python Playwright with CloakBrowser plus the 
 | Need | Notes |
 |---|---|
 | Linux | headless VPS is fine |
-| Python 3.11+ | venv + `pip install playwright` (**driver only**) |
+| Python 3.11+ | venv + `pip install -r requirements.txt` |
 | **CloakBrowser non-pro** | Binary at `~/.cloakbrowser/chromium-<ver>/chrome`. **Not** stock Chromium. |
 | Playwright Python | Wires to Cloak via `executable_path=CLOAK`. Do **not** `playwright install chromium`. |
-| Browser execution | CloakBrowser is the only Chromium implementation. Python Playwright runs verified recipes; Browser Use over loopback CDP is the planned discovery/recovery layer. |
-| Agent tooling | Playwright CLI + skills for token-efficient inspection/replay. CloakBrowser MCP and Playwright MCP are optional deep-diagnostic tools, not equal primary executors. |
-| An **agent** | Hermes, Claude Code, Codex, OpenCode — must read docs/AGENT_INSTRUCTIONS.md |
-| Optional | systemd, 5‑min watchdog cron, `GROQ_API_KEY` |
+| An **agent** (optional) | Hermes / Claude Code / Codex / OpenCode — read docs/AGENT_INSTRUCTIONS.md |
+| systemd (optional) | Unattended workers. Laptop clones can run one worker in the foreground. |
 
-**Never in git:** `profile_local.py`, `.env`, cookies (`portal_*.json`, `profiles/`), DBs, resumes, passwords.
+**Never in git:** `profile_local.py`, `.env`, cookies, DBs, résumés, passwords, `.farm_paused`.
 
----
+**Clone install (full steps):** [docs/INSTALL.md](docs/INSTALL.md)
 
 ## 1. Clone and install
 
@@ -81,16 +79,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pip install -r requirements-dev.txt
 # Do not run `playwright install`; CloakBrowser supplies the executable.
-# Install CloakBrowser non-pro, then:
-export CLOAK="$HOME/.cloakbrowser/chromium-<version>/chrome"
-# Optional diagnostics: enable CloakBrowser MCP / Playwright MCP.
-# The target router attaches Browser Use and Playwright CLI to CloakBrowser over loopback CDP.
 
 # Pure public-clone verification (no live profile, cookies, queue, or portal):
 python -m pytest -q
 python -m compileall -q .
 ```
-See [docs/STACK.md](docs/STACK.md) for the exact browser stack.
+
+See [docs/STACK.md](docs/STACK.md) for the browser stack and [docs/INSTALL.md](docs/INSTALL.md) to go from green tests to a first apply.
 
 ---
 
@@ -154,6 +149,16 @@ python worker_external.py w1
 
 When a worker logs `needs-agent`, `no-apply-modal`, `fill-err`, or `submit-unconfirmed` — **stop scripting and run the agent loop.** Do not add another `button.css-abc123`.
 
+### Pause / resume the farm
+
+```bash
+python jobhunt_farm.py status
+python jobhunt_farm.py pause
+python jobhunt_farm.py resume
+```
+
+Stops apply workers and makes harvest + watchdog no-ops until `resume`. Dashboard stays up.
+
 ---
 
 ## 5. Sessions
@@ -214,10 +219,11 @@ The following resources were added to `resource_sources.json`. They are *not* ac
 
 ## Docs (feed these to any agent)
 
-1. **[docs/AGENT_INSTRUCTIONS.md](docs/AGENT_INSTRUCTIONS.md)** — paste this first  
-2. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — every component  
-3. **[docs/AGENT_LOOP.md](docs/AGENT_LOOP.md)** — UI repair tick  
-4. GitNexus: `node .gitnexus/run.cjs analyze` then `query` / `impact` / `context`
+1. **[docs/INSTALL.md](docs/INSTALL.md)** — clone → test → first local run
+2. **[docs/AGENT_INSTRUCTIONS.md](docs/AGENT_INSTRUCTIONS.md)** — paste this first for an agent
+3. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — every component
+4. **[docs/AGENT_LOOP.md](docs/AGENT_LOOP.md)** — UI repair tick
+5. GitNexus: `node .gitnexus/run.cjs analyze` then `query` / `impact` / `context`
 
 Optional bounded UI picker: set `GROQ_API_KEY`. `dynamic_ui` sends only a
 privacy-sanitized candidate inventory to the fixed Groq HTTPS endpoint and
