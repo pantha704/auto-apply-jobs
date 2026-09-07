@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-QUEUE_VERSION = 3
+QUEUE_VERSION = 4
 CONTROL_VERSION = 7
 
 
