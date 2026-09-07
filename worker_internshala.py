@@ -22,6 +22,8 @@ from workflow.application_gate import (
     PublicationUnavailable,
     eligible_for_claim,
     pin_claim,
+    guarded_mark,
+    fence_token_for,
     published_runtime,
 )
 import jd_match
@@ -98,6 +100,12 @@ def claim(runtime):
             telemetry().outcome(row[0], "skip", "policy-ineligible")
             continue
         upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
+        try:
+            from workflow.release_bundle import build_from_runtime
+            _fence = fence_token_for(c, row[0], WORKER_ID) or ""
+            _bundle = build_from_runtime("internshala", runtime, row[0], _fence)
+        except Exception:
+            _bundle, _fence = None, ""
         c.commit(); c.close()
         if upd_count == 1:
             telemetry().claimed(row[0])
@@ -105,7 +113,8 @@ def claim(runtime):
 
 def mark(jid, status, result=""):
     c = db()
-    c.execute("UPDATE jobs SET status=?, result=? WHERE id=?", (status, result[:200], jid))
+    from workflow.application_gate import guarded_mark
+    guarded_mark(c, jid, WORKER_ID, status, result)
     c.commit(); c.close()
     telemetry().outcome(jid, status, result)
 

@@ -196,6 +196,37 @@ def check_fence(db: sqlite3.Connection, job_id: str, worker_id: str, fence_token
     return True
 
 
+def guarded_mark(
+    db: sqlite3.Connection,
+    job_id: str,
+    worker_id: str,
+    status: str,
+    result: str = "",
+    fence_token: str | None = None,
+) -> int:
+    """Owner-checked transition. Returns rowcount (1 ok, 0 lost ownership).
+
+    R5: all worker mark() paths must go through here. If fence_token given,
+    it must match; otherwise ownership alone is required. Uncertain post-send
+    outcomes can never return to pending.
+    """
+    result = (result or "")[:200]
+    if "submit-unconfirmed" in result or "send-unconfirmed" in result:
+        if status == "pending":
+            raise ValueError("guarded_mark refused: uncertain post-send cannot requeue")
+    if fence_token:
+        cur = db.execute(
+            "UPDATE jobs SET status=?, result=? WHERE id=? AND claimed_by=? AND last_fence_token=?",
+            (status, result, job_id, worker_id, fence_token),
+        )
+        return cur.rowcount
+    cur = db.execute(
+        "UPDATE jobs SET status=?, result=? WHERE id=? AND claimed_by=?",
+        (status, result, job_id, worker_id),
+    )
+    return cur.rowcount
+
+
 def eligible_for_claim(runtime: PublishedApplicationRuntime, job: Mapping[str, Any]) -> bool:
     """Evaluate against full normalized job facts — title, portal, location,
     company, compensation, and description length — not just title+portal.

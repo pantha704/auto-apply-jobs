@@ -82,3 +82,28 @@ def create_release_bundle(
         claim_id=claim_id,
         claim_token=claim_token,
     )
+
+
+def build_from_runtime(portal: str, runtime, job_id: str, fence_token: str) -> ReleaseBundle:
+    """R7: freeze live runtime into immutable bundle at claim time.
+
+    Workers must call this immediately after pin_claim success and carry
+    the bundle (not live session/profile lookups) through the run.
+    """
+    facts = dict(getattr(runtime, "facts", {}) or {})
+    session_state = {"revision": int(getattr(runtime, "session_revision", 0) or 0)}
+    policy = getattr(runtime, "preference_set", None)
+    return create_release_bundle(
+        portal=portal,
+        profile_id=str(getattr(runtime, "profile_id", "")),
+        profile_revision=int(getattr(runtime, "profile_revision", 0) or 0),
+        resume_id=str(getattr(runtime, "resume_id", "")),
+        resume_path=str(getattr(runtime, "resume_path", "")),
+        preference_set_id=str(getattr(policy, "id", "") if policy else ""),
+        preference_set_version=int(getattr(policy, "version", 0) if policy else 0),
+        session_revision=int(getattr(runtime, "session_revision", 0) or 0),
+        session_state=session_state,
+        facts=facts,
+        claim_id=str(job_id),
+        claim_token=str(fence_token or ""),
+    )
