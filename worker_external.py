@@ -337,7 +337,19 @@ def main():
             mark(job["id"], "pending", "browser-wedge-timeout")
             log("BROWSER WEDGE — job requeued, exiting for systemd restart")
             os._exit(7)
-        mark(job["id"], "done" if ok else "skip", reason)
+        from audit import SubmissionFinalizer
+        _fin = SubmissionFinalizer(QUEUE_DB)
+        _fin.finalize(
+            job_id=job["id"],
+            status="done" if ok else "skip",
+            result=reason,
+            portal="external",
+            company="",
+            role=job["title"],
+            url=job["url"],
+            audit_status="submitted" if ok else f"skipped:{reason[:60]}",
+            note=reason[:200],
+        )
         log(f"{'DONE' if ok else 'SKIP'}: {reason[:90]}")
         time.sleep(3)
 

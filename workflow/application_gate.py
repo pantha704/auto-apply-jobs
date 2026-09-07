@@ -159,7 +159,14 @@ def pin_claim(
 
 
 def eligible_for_claim(runtime: PublishedApplicationRuntime, job: Mapping[str, Any]) -> bool:
-    """F07 fix: Evaluate against full normalized job facts, not just title+portal."""
+    """Evaluate against full normalized job facts — title, portal, location,
+    company, compensation, and description length — not just title+portal.
+
+    Workers MUST pass the full job row (or a dict containing at least title,
+    portal, location, and company) so the policy engine can evaluate all active
+    rules.  Missing fields are set to safe defaults that let the policy's
+    unknown_policy controls take effect.
+    """
     enriched = dict(job)
     # Ensure salary_min is populated from title extraction if missing.
     if enriched.get("salary_min") in (None, ""):
@@ -169,5 +176,9 @@ def eligible_for_claim(runtime: PublishedApplicationRuntime, job: Mapping[str, A
     # Ensure location is available for policy checks.
     if not enriched.get("location") and not enriched.get("location_raw"):
         enriched["location"] = ""
+    # Ensure description_length is populated from description if present.
+    desc = enriched.get("description") or ""
+    if not enriched.get("description_length"):
+        enriched["description_length"] = len(desc)
     result = runtime.evaluate(enriched)
     return result.eligible and not result.needs_review

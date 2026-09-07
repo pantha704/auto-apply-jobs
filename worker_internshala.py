@@ -27,6 +27,7 @@ from workflow.application_gate import (
 import jd_match
 from submission_signals import has_submission_confirmation
 from worker_guard import BrowserWatchdog
+from workflow.answers import AnswerRepository
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
@@ -41,6 +42,7 @@ DAILY_CAP = int(os.environ.get("IS_DAILY_CAP", "40"))
 STEALTH = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
 
 PROFILE_DATA = {}
+ANSWERS_REPO = None
 REQUIRED_FACTS = (
     ("location.remote_statement", "profile.remote_statement"),
     ("employment.availability_statement", "profile.availability_statement"),
@@ -51,7 +53,7 @@ REQUIRED_FACTS = (
 
 
 def configure_publication(runtime):
-    global PROFILE_DATA, RESUME
+    global PROFILE_DATA, RESUME, ANSWERS_REPO
     PROFILE_DATA = {
         "remote_statement": str(runtime.fact("location.remote_statement", "profile.remote_statement")),
         "availability_statement": str(runtime.fact("employment.availability_statement", "profile.availability_statement")),
@@ -60,6 +62,14 @@ def configure_publication(runtime):
         "pitch": str(runtime.fact("cover_note.default", "summary.pitch", "profile.pitch")),
     }
     RESUME = runtime.resume_path
+    try:
+        _ctrl_db = os.getenv('JOBHUNT_CONTROL_DB', os.path.join(HERE, 'controlplane.db'))
+        _key_path = os.getenv('JOBHUNT_VAULT_KEY', os.path.join(HERE, '.controlplane.key'))
+        from cryptography.fernet import Fernet as _F
+        _k = _F(open(_key_path, 'rb').read().strip())
+        ANSWERS_REPO = AnswerRepository(_ctrl_db, _k)
+    except Exception:
+        ANSWERS_REPO = None
 
 def log(msg):
     print(f"[{WORKER_ID}] [{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -73,7 +83,7 @@ def telemetry():
 def claim(runtime):
     while True:
         c = db()
-        row = c.execute("SELECT id, url, title FROM jobs WHERE portal='internshala' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
+        row = c.execute("SELECT id, url, title, location, company FROM jobs WHERE portal='internshala' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
         if not row:
             c.close(); telemetry().idle(); return None
         reason = title_rejection_reason(row[2] or "", "internshala")
@@ -82,7 +92,7 @@ def claim(runtime):
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", reason)
             continue
-        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "internshala"}):
+        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "internshala", "location": row[3] or "", "company": row[4] or ""}):
             c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", "policy-ineligible")
@@ -91,7 +101,7 @@ def claim(runtime):
         c.commit(); c.close()
         if upd_count == 1:
             telemetry().claimed(row[0])
-            return {"id": row[0], "url": row[1], "title": row[2]}
+            return {"id": row[0], "url": row[1], "title": row[2], "location": row[3] or "", "company": row[4] or ""}
 
 def mark(jid, status, result=""):
     c = db()
@@ -132,18 +142,22 @@ def fill_textareas(page, note):
         if f["val"].strip():
             continue
         q = f["q"].lower()
+        # Check AnswerRepository first for typed dynamic answers
+        _repo_answer = None
+        if ANSWERS_REPO:
+            _repo_answer = ANSWERS_REPO.lookup("cover_note.default", {})
         if i == 0:
-            text = note
+            text = _repo_answer or note
         elif any(k in q for k in ["relocat", "location", "shift"]):
             text = PROFILE_DATA["remote_statement"]
         elif any(k in q for k in ["availab", "start", "joining", "immediate"]):
             text = PROFILE_DATA["availability_statement"]
         elif any(k in q for k in ["why", "suitable", "fit", "hire"]):
-            text = note
+            text = _repo_answer or note
         elif any(k in q for k in ["experience", "skill"]):
             text = PROFILE_DATA["years"] + " years of experience — " + PROFILE_DATA["stack"][:150] + "."
         else:
-            text = note
+            text = _repo_answer or note
         try:
             page.evaluate(f"""() => {{
               const els = [...document.querySelectorAll('textarea')].filter(e => e.offsetParent !== null);
@@ -252,9 +266,19 @@ def run_once():
                 body = page.inner_text("body")[:6000].lower()
                 # already applied / closed
                 if "already applied" in body or "application submitted" in body:
-                    mark(job["id"], "done", "already-applied")
+                    from audit import SubmissionFinalizer
+                    _fin = SubmissionFinalizer(QUEUE_DB)
+                    _fin.finalize(
+                        job_id=job["id"],
+                        status="done",
+                        result="already-applied",
+                        portal="internshala",
+                        company="",
+                        role=job["title"],
+                        url=job["url"],
+                        audit_status="already-applied",
+                    )
                     log("already applied")
-                    audit.record_application("internshala", "", job["title"], job["url"], "already-applied")
                     continue
                 if "applications closed" in body or "application deadline" in body and "has passed" in body:
                     mark(job["id"], "skip", "closed")

@@ -174,7 +174,7 @@ def review(job):
                 status, reason, note = wy.apply_url(url)
                 if status == "submitted":
                     audit_record(job, url, note)
-                    return mark(job["id"], "done", "reviewed|submitted")
+                    return
                 if reason.startswith("error|") or "timeout" in reason.lower():
                     time.sleep(5)
                     continue
@@ -197,11 +197,21 @@ def review(job):
 
 
 def audit_record(job, url, note):
-    import audit
-    audit.record_application("yc", job["title"], job["title"], url,
-                             "submitted", answers={"note": (note or "")[:400]},
-                             resume_used=job["runtime"].resume_path,
-                             note="reviewed")
+    from audit import SubmissionFinalizer
+    _fin = SubmissionFinalizer(QUEUE_DB)
+    _fin.finalize(
+        job_id=job["id"],
+        status="done",
+        result="reviewed|submitted",
+        portal="yc",
+        company=job["title"],
+        role=job["title"],
+        url=url,
+        audit_status="submitted",
+        answers={"note": (note or "")[:400]},
+        resume_used=job["runtime"].resume_path,
+        note="reviewed",
+    )
 
 
 def main():

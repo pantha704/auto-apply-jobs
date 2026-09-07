@@ -18,6 +18,7 @@ from workflow.application_gate import (
     pin_claim,
     published_runtime,
 )
+from workflow.answers import AnswerRepository
 import jd_match
 from submission_signals import has_submission_confirmation
 from title_filter import title_rejection_reason
@@ -36,6 +37,7 @@ CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 STEALTH = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
 
 PROFILE_DATA = {}
+ANSWERS_REPO = None
 REQUIRED_FACTS = (
     ("contact.phone", "profile.phone"),
     ("contact.address", "profile.address"),
@@ -73,6 +75,15 @@ def configure_publication(runtime):
         "pitch": str(runtime.fact("summary.pitch", "profile.pitch")),
     }
     RESUME = runtime.resume_path
+    global ANSWERS_REPO
+    try:
+        _ctrl_db = os.getenv('JOBHUNT_CONTROL_DB', os.path.join(HERE, 'controlplane.db'))
+        _key_path = os.getenv('JOBHUNT_VAULT_KEY', os.path.join(HERE, '.controlplane.key'))
+        from cryptography.fernet import Fernet as _F
+        _k = _F(_key_path.read_bytes().strip() if hasattr(_key_path, 'read_bytes') else open(_key_path, 'rb').read().strip())
+        ANSWERS_REPO = AnswerRepository(_ctrl_db, _k)
+    except Exception:
+        ANSWERS_REPO = None
 ZERO_TOPICS = ["go", "banking", "php", "laravel", "java", "excel", "wordpress", "django", "embedded", "iot", "excel"]
 ONE_TOPICS = ["python", "typescript", "react", "node", "javascript", "database", "postgres", "sql",
               "full stack", "frontend", "backend", "software", "development", "information technology", "it "]
@@ -86,7 +97,7 @@ def telemetry():
 def claim(portal, runtime):
     while True:
         c = db()
-        row = c.execute("SELECT id, url, title FROM jobs WHERE portal=? AND status='pending' ORDER BY prio DESC, rowid LIMIT 1", (portal,)).fetchone()
+        row = c.execute("SELECT id, url, title, location, company FROM jobs WHERE portal=? AND status='pending' ORDER BY prio DESC, rowid LIMIT 1", (portal,)).fetchone()
         if not row:
             c.close(); telemetry().idle(); return None
         reason = title_rejection_reason(row[2] or "", "linkedin")
@@ -95,7 +106,7 @@ def claim(portal, runtime):
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", reason)
             continue
-        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": portal}):
+        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": portal, "location": row[3] or "", "company": row[4] or ""}):
             c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", "policy-ineligible")
@@ -104,7 +115,7 @@ def claim(portal, runtime):
         c.commit(); c.close()
         if upd_count == 1:
             telemetry().claimed(row[0])
-            return {"id": row[0], "url": row[1], "title": row[2]}
+            return {"id": row[0], "url": row[1], "title": row[2], "location": row[3] or "", "company": row[4] or ""}
 
 def mark(jid, status, result=""):
     c = db()
@@ -222,10 +233,22 @@ def answer_page(page):
                 elif "portfolio" in low or "website" in low: val = PROFILE_DATA["portfolio"]
                 elif "college" in low or "university" in low: val = PROFILE_DATA["college"]
                 elif "technolog" in low: val = PROFILE_DATA["stack"]
-                elif "framework" in low: val = "Next.js, React, Node.js, Hono"
+                elif "framework" in low:
+                    if ANSWERS_REPO:
+                        val = ANSWERS_REPO.lookup("preference.framework", {})
+                    if not val:
+                        val = PROFILE_DATA["stack"][:80]
                 elif "unique" in low: val = PROFILE_DATA["pitch"]
-                elif "start" in low: val = "Immediate"
-                elif "skills" in low: val = "4"
+                elif "start" in low:
+                    if ANSWERS_REPO:
+                        val = ANSWERS_REPO.lookup("preference.start_date", {})
+                    if not val:
+                        val = "Immediate"
+                elif "skills" in low:
+                    if ANSWERS_REPO:
+                        val = ANSWERS_REPO.lookup("preference.skills_count", {})
+                    if not val:
+                        val = "4"
                 elif "gpa" in low: val = ""  # skip GPA
                 elif "experience" in low or "years" in low:
                     if any(k in low for k in ZERO_TOPICS): val = "0"
@@ -276,19 +299,24 @@ def main():
             mark(job["id"], "pending", "browser-wedge-timeout")
             log("BROWSER WEDGE — job requeued, exiting for systemd restart")
             os._exit(7)
-        mark(job["id"], "done" if ok[0] else "skip", ok[1])
-        try:
-            audit.record_application(
-                portal="linkedin", company=job.get("company") or "(linkedin)", role=job["title"],
-                url=job["url"], status="submitted" if ok[0] else f"skipped:{ok[1][:60]}",
-                answers=getattr(apply_job, "last_answers", None),
-                resume_used=os.path.basename(RESUME), note=ok[1][:200],
-                snap_before=(LAST_SNAPS.get("before") or {}).get("png"),
-                snap_after=(LAST_SNAPS.get("after") or {}).get("png"))
-            log(f"{'DONE' if ok[0] else 'SKIP'}: {job['title'][:50]} ({ok[1][:60]})")
-        except Exception as e:
-            mark(job["id"], "error", str(e)[:150])
-            log(f"ERROR: {str(e)[:120]}")
+        from audit import SubmissionFinalizer
+        _fin = SubmissionFinalizer(DB)
+        _fin.finalize(
+            job_id=job["id"],
+            status="done" if ok[0] else "skip",
+            result=ok[1],
+            portal="linkedin",
+            company=job.get("company") or "(linkedin)",
+            role=job["title"],
+            url=job["url"],
+            audit_status="submitted" if ok[0] else f"skipped:{ok[1][:60]}",
+            answers=getattr(apply_job, "last_answers", None),
+            resume_used=os.path.basename(RESUME),
+            note=ok[1][:200],
+            snap_before=(LAST_SNAPS.get("before") or {}).get("png"),
+            snap_after=(LAST_SNAPS.get("after") or {}).get("png"),
+        )
+        log(f"{'DONE' if ok[0] else 'SKIP'}: {job['title'][:50]} ({ok[1][:60]})")
         time.sleep(2)
 
 def apply_job(url, expected_session_revision=None):

@@ -19,6 +19,7 @@ from workflow.application_gate import (
     pin_claim,
     published_runtime,
 )
+from workflow.answers import AnswerRepository
 import jd_match
 from workflow.browser_use_client import BrowserUseSidecar
 from submission_signals import has_submission_confirmation
@@ -44,6 +45,7 @@ CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 APPLY_DIALOG = "[role=dialog][aria-modal=true]:not([id*=truste]):not([id*=consent]), .ReactModal__Content"
 
 ANSWERS = {}
+ANSWERS_REPO = None
 SNAPS = {}
 
 PROFILE = {}
@@ -73,6 +75,15 @@ def configure_publication(runtime):
         "requires_sponsorship": runtime.boolean_fact("work_authorization.requires_sponsorship", "profile.requires_sponsorship"),
     }
     RESUME = runtime.resume_path
+    global ANSWERS_REPO
+    try:
+        _ctrl_db = os.getenv('JOBHUNT_CONTROL_DB', os.path.join(HERE, 'controlplane.db'))
+        _key_path = os.getenv('JOBHUNT_VAULT_KEY', os.path.join(HERE, '.controlplane.key'))
+        from cryptography.fernet import Fernet as _F
+        _k = _F(open(_key_path, 'rb').read().strip())
+        ANSWERS_REPO = AnswerRepository(_ctrl_db, _k)
+    except Exception:
+        ANSWERS_REPO = None
 
 
 def safe_diagnostic_text(text):
@@ -93,7 +104,7 @@ def telemetry():
 def claim(runtime):
     while True:
         c = db()
-        row = c.execute("SELECT id, url, title FROM jobs WHERE portal='wellfound' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
+        row = c.execute("SELECT id, url, title, location, company FROM jobs WHERE portal='wellfound' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
         if not row:
             c.close(); telemetry().idle(); return None
         reason = title_rejection_reason(row[2] or "", "wellfound")
@@ -102,7 +113,7 @@ def claim(runtime):
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", reason)
             continue
-        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "wellfound"}):
+        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "wellfound", "location": row[3] or "", "company": row[4] or ""}):
             c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", "policy-ineligible")
@@ -111,7 +122,7 @@ def claim(runtime):
         c.commit(); c.close()
         if upd_count == 1:
             telemetry().claimed(row[0])
-            return {"id": row[0], "url": row[1], "title": row[2]}
+            return {"id": row[0], "url": row[1], "title": row[2], "location": row[3] or "", "company": row[4] or ""}
 
 def mark(jid, status, result=""):
     c = db()
@@ -138,7 +149,13 @@ def fill_dlg(page, label, value):
 
 def expand_category(url, ctx, page):
     """Category page (/role/r/...): scrape individual /jobs/ links and enqueue them.
-    Returns (count_added, first_job_url) or (0, None)."""
+    
+    F12 fix: Expansion produces normalized child jobs only, not parent context.
+    Each child job gets its own normalized title extracted from the URL, not the
+    parent category title.
+    
+    Returns (count_added, first_job_url) or (0, None).
+    """
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=40000)
         page.wait_for_timeout(5000)
@@ -162,7 +179,12 @@ def expand_category(url, ctx, page):
                 cur = c.execute("SELECT id FROM jobs WHERE id=? OR url=?", (jid, l)).fetchone()
                 if cur:
                     continue
-                ttl = l.split("/jobs/")[-1].split("-", 1)[-1].replace("-", " ")[:80]
+                # F12 fix: Normalize child job title from URL, not parent context
+                # Extract job title from URL slug, not from page/parent context
+                url_slug = l.split("/jobs/")[-1].split("-", 1)[-1] if "/jobs/" in l else ""
+                ttl = url_slug.replace("-", " ")[:80].strip()
+                if not ttl:
+                    ttl = "Wellfound Job"
                 if not is_tech_title(ttl, "wellfound"):
                     continue
                 c.execute("INSERT OR IGNORE INTO jobs (id, portal, url, title, source, status, prio, fetched_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -442,7 +464,10 @@ def _apply_one(url, expected_session_revision=None):
             # years of experience select
             try:
                 sel = page.locator(APPLY_DIALOG + " select").first
-                sel.select_option(label="1 year")
+                _exp_val = None
+                if ANSWERS_REPO:
+                    _exp_val = ANSWERS_REPO.lookup("preference.experience_years", {})
+                sel.select_option(label=str(_exp_val or PROFILE.get("years", "1 year") + " year"))
             except Exception:
                 pass
             # years of experience — custom downshift combobox fallback (no native select)
@@ -464,7 +489,12 @@ def _apply_one(url, expected_session_revision=None):
             # desired salary
             try:
                 num = page.locator(APPLY_DIALOG + " input[type=number]").first
-                num.fill(PROFILE["salary"])
+                _sal = PROFILE["salary"]
+                if ANSWERS_REPO:
+                    _repo_sal = ANSWERS_REPO.lookup("preference.salary", {})
+                    if _repo_sal:
+                        _sal = str(_repo_sal)
+                num.fill(_sal)
             except Exception:
                 pass
             # work authorization radios: answer honestly per question text, never guess
@@ -709,17 +739,23 @@ def main():
             mark(job["id"], "pending", "browser-wedge-timeout")
             print(f"[{WORKER_ID}] BROWSER WEDGE — job requeued, exiting for systemd restart", flush=True)
             os._exit(7)
-        mark(job["id"], "done" if ok else "skip", reason)
-        try:
-            audit.record_application(
-                portal="wellfound", company="(wellfound)", role=job["title"], url=job["url"],
-                status="submitted" if ok else f"skipped:{reason[:60]}",
-                answers=ANSWERS, resume_used=os.path.basename(RESUME),
-                note=reason[:200],
-                snap_before=(SNAPS.get("before") or {}).get("png"),
-                snap_after=(SNAPS.get("after") or {}).get("png"))
-        except Exception as e:
-            print(f"[{WORKER_ID}] audit record failed: {str(e)[:80]}", flush=True)
+        from audit import SubmissionFinalizer
+        _fin = SubmissionFinalizer(QUEUE_DB)
+        _fin.finalize(
+            job_id=job["id"],
+            status="done" if ok else "skip",
+            result=reason,
+            portal="wellfound",
+            company="(wellfound)",
+            role=job["title"],
+            url=job["url"],
+            audit_status="submitted" if ok else f"skipped:{reason[:60]}",
+            answers=ANSWERS,
+            resume_used=os.path.basename(RESUME),
+            note=reason[:200],
+            snap_before=(SNAPS.get("before") or {}).get("png"),
+            snap_after=(SNAPS.get("after") or {}).get("png"),
+        )
         print(f"[{WORKER_ID}] {'DONE' if ok else 'SKIP'}: {reason[:80]}", flush=True)
         time.sleep(3)
 

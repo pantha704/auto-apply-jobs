@@ -182,6 +182,117 @@ def record_submission_proof(
         application_id=rid,
     )
 
+class SubmissionFinalizer:
+    """Atomically update jobs status AND write audit record in one transaction.
+
+    This replaces the two-step pattern of mark() + audit.record_application()
+    which could disagree if one succeeded and the other failed.
+
+    Usage:
+        finalizer = SubmissionFinalizer(QUEUE_DB)
+        finalizer.finalize(
+            job_id=job["id"],
+            status="done", result="submitted",
+            portal="linkedin", company="Acme", role="Engineer",
+            url="https://...", audit_status="submitted",
+            answers=answers, resume_used="resume.pdf",
+            note="applied", snap_before=..., snap_after=...,
+        )
+    """
+
+    def __init__(self, db_path: str | None = None):
+        self._db_path = db_path or DB
+
+    def finalize(
+        self,
+        *,
+        job_id: str | int,
+        status: str,
+        result: str = "",
+        portal: str,
+        company: str = "",
+        role: str = "",
+        url: str = "",
+        audit_status: str,
+        answers=None,
+        resume_used=None,
+        note: str = "",
+        snap_before=None,
+        snap_after=None,
+    ) -> None:
+        """Atomically update queue status and write audit record."""
+        c = sqlite3.connect(self._db_path, timeout=10)
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            # 1. Update jobs table (replaces mark())
+            c.execute(
+                "UPDATE jobs SET status=?, result=? WHERE id=?",
+                (status, result[:200], job_id),
+            )
+            # 2. Write audit record to applications table
+            uh = hashlib.sha1(canonical(url).encode()).hexdigest() if url else ""
+            exists = c.execute(
+                "SELECT id, status FROM applications WHERE portal=? AND url_hash=?",
+                (portal, uh),
+            ).fetchone() if uh else None
+            now = datetime.now(timezone.utc).isoformat()
+            if exists:
+                if exists[1] == "submit-unconfirmed" and audit_status in {
+                    "applied",
+                    "submitted",
+                }:
+                    c.execute(
+                        """UPDATE applications SET status=?, applied_at=?,
+                           answers=?, resume_used=?, note=?,
+                           snap_before=COALESCE(?, snap_before),
+                           snap_after=? WHERE id=?""",
+                        (
+                            audit_status,
+                            now,
+                            json.dumps(answers, ensure_ascii=False)
+                            if answers
+                            else None,
+                            resume_used,
+                            note,
+                            snap_before,
+                            snap_after,
+                            exists[0],
+                        ),
+                    )
+            elif url:
+                try:
+                    c.execute(
+                        """INSERT INTO applications
+                        (portal, company, role, url, applied_at, answers,
+                         resume_used, status, note, snap_before, snap_after, url_hash)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            portal,
+                            company,
+                            role,
+                            url,
+                            now,
+                            json.dumps(answers, ensure_ascii=False)
+                            if answers
+                            else None,
+                            resume_used,
+                            audit_status,
+                            note,
+                            snap_before,
+                            snap_after,
+                            uh,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    pass  # duplicate — acceptable
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            c.close()
+
+
 # F01 fix: Hardcoded PROFILE dict removed. Workers MUST use
 # workflow.application_gate.published_runtime() and workflow.answers.AnswerRepository
 # for all candidate facts. The old PROFILE dict allowed workers to bypass the

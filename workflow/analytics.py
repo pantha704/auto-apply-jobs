@@ -106,11 +106,13 @@ def aggregate_analytics(
             return " AND ".join(clauses), args
 
         confirmed_times: list[datetime] = []
+        run_count = 0
         # v2 is authoritative when available; legacy applications is the fallback.
         if capabilities["application_runs"] and {"confirmed", "started_at"} <= cols["application_runs"]:
             where, args = bounded("started_at")
             rows = db.execute(f"SELECT started_at FROM application_runs WHERE confirmed=1 AND {where}", args)
             confirmed_times = [_utc(row[0]) for row in rows]
+            run_count = db.execute(f"SELECT count(*) FROM application_runs WHERE {where}", args).fetchone()[0]
         elif capabilities["applications"] and "applied_at" in cols["applications"]:
             where, args = bounded("applied_at")
             status = " AND status IN ('submitted','applied','success')" if "status" in cols["applications"] else ""
@@ -173,16 +175,20 @@ def aggregate_analytics(
 
         points = Counter(_bucket_start(t, bucket).isoformat() for t in confirmed_times)
         timeline = [{"start": key, "count": points[key]} for key in sorted(points)]
+        # success_rate: prefer application_runs denominator (same source as
+        # confirmed_times); fall back to job_attempts for legacy DBs.
+        rate_base = run_count if run_count else attempts
         return {
             "range": {"name": range_name, "start": start.isoformat() if start else None, "end": end.isoformat(), "bucket": bucket},
             "capabilities": capabilities,
             "confirmed_applications": len(confirmed_times),
             "timeline": timeline,
             "attempts": attempts,
+            "run_count": run_count,
             "outcomes": dict(sorted(outcomes.items())),
             "portals": dict(sorted(portals.items())),
             "queue_depth": queue,
-            "success_rate": len(confirmed_times) / attempts if attempts else 0.0,
+            "success_rate": len(confirmed_times) / rate_base if rate_base else 0.0,
             "durations_ms": _duration_summary(durations),
             "leases": {"expired": int(expired), "recoveries": int(recoveries)},
             "workers": {"total": sum(workers.values()), "by_state": dict(sorted(workers.items()))},

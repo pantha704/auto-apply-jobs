@@ -1,0 +1,82 @@
+"""Release bundle — one immutable snapshot loaded once per claim.
+
+F10 fix: Workers can no longer fetch session revision and later reload
+current session. Instead, they load one immutable release bundle at claim
+time that freezes session + profile + resume + policy for the entire run.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ReleaseBundle:
+    """Immutable application release bundle loaded once at claim time.
+    
+    This freezes:
+    - Session revision and state
+    - Profile ID and revision
+    - Resume ID and path
+    - Preference set (policy)
+    - Portal session revision
+    """
+    portal: str
+    profile_id: str
+    profile_revision: int
+    resume_id: str
+    resume_path: str
+    preference_set_id: str
+    preference_set_version: int
+    session_revision: int
+    session_state: Mapping[str, Any]
+    facts: Mapping[str, Any]
+    claim_id: str
+    claim_token: str
+
+    def fact(self, *aliases: str) -> Any:
+        """Get a profile fact by alias chain."""
+        for key in aliases:
+            value = self.facts.get(key)
+            if value is not None and (not isinstance(value, str) or value.strip()):
+                return value
+        raise KeyError(f"release bundle is missing required fact: {aliases[0]}")
+
+    def boolean_fact(self, *aliases: str) -> bool:
+        """Get a boolean profile fact."""
+        value = self.fact(*aliases)
+        if not isinstance(value, bool):
+            raise TypeError(f"release bundle fact must be boolean: {aliases[0]}")
+        return value
+
+
+def create_release_bundle(
+    *,
+    portal: str,
+    profile_id: str,
+    profile_revision: int,
+    resume_id: str,
+    resume_path: str,
+    preference_set_id: str,
+    preference_set_version: int,
+    session_revision: int,
+    session_state: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    claim_id: str,
+    claim_token: str,
+) -> ReleaseBundle:
+    """Create an immutable release bundle from claim-time data."""
+    return ReleaseBundle(
+        portal=portal,
+        profile_id=profile_id,
+        profile_revision=profile_revision,
+        resume_id=resume_id,
+        resume_path=resume_path,
+        preference_set_id=preference_set_id,
+        preference_set_version=preference_set_version,
+        session_revision=session_revision,
+        session_state=dict(session_state),
+        facts=dict(facts),
+        claim_id=claim_id,
+        claim_token=claim_token,
+    )

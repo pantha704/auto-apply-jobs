@@ -79,12 +79,12 @@ def telemetry():
 
 def claim(runtime):
     c = db()
-    row = c.execute("SELECT id, url, title FROM jobs WHERE portal='yc' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
+    row = c.execute("SELECT id, url, title, location, company FROM jobs WHERE portal='yc' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
     if not row:
         c.close()
         telemetry().idle()
         return None
-    if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "yc"}):
+    if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "yc", "location": row[3] or "", "company": row[4] or ""}):
         c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
         c.commit(); c.close()
         telemetry().outcome(row[0], "skip", "policy-ineligible")
@@ -95,7 +95,7 @@ def claim(runtime):
     if upd_count != 1:
         return claim(runtime)
     telemetry().claimed(row[0])
-    return {"id": row[0], "url": row[1], "title": row[2]}
+    return {"id": row[0], "url": row[1], "title": row[2], "location": row[3] or "", "company": row[4] or ""}
 
 def mark(jid, status, result=""):
     c = db()
@@ -311,10 +311,21 @@ def handle(job, expected_session_revision=None):
                     m = re.search(r"at\s+([A-Za-z0-9&.\- ]+?)(?:\(W\d+\))?\s*$", (page.inner_text("h1") or "")[:150])
                     if m:
                         comp = m.group(1).strip()
-                    audit.record_application("yc", comp or job["title"], job["title"], url,
-                                             "submitted", answers={"note": note[:400]}, resume_used=RESUME,
-                                             note=result)
-                    mark(job["id"], "done", "submitted")
+                    from audit import SubmissionFinalizer
+                    _fin = SubmissionFinalizer(QUEUE_DB)
+                    _fin.finalize(
+                        job_id=job["id"],
+                        status="done",
+                        result="submitted",
+                        portal="yc",
+                        company=comp or job["title"],
+                        role=job["title"],
+                        url=url,
+                        audit_status="submitted",
+                        answers={"note": note[:400]},
+                        resume_used=RESUME,
+                        note=result,
+                    )
                 else:
                     mark(job["id"], "skip", result)
     except Exception as e:

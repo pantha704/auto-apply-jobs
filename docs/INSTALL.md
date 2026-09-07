@@ -106,3 +106,27 @@ Dashboard top bar also has **Pause farm**, **Resume farm**, and **Shutdown**. Da
 ## Agent docs
 
 If an AI is operating the repo, give it [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) and [AGENT_LOOP.md](AGENT_LOOP.md) after this file. It must not invent answers or commit secrets.
+
+## Quick reference: Makefile
+
+```bash
+make help          # list all targets
+make install-dev   # pip install requirements.txt + requirements-dev.txt
+make check         # lint + test (what CI runs)
+make test          # pytest tests/
+make dashboard     # local dashboard on :8787
+```
+
+## Quick reference: Docker
+
+```bash
+make docker        # build image
+make docker-run    # run dashboard in container on :8787
+```
+
+Or directly:
+
+```bash
+docker build -t jobhunt-linkedin .
+docker run --rm -p 8787:8787 -e JOBHUNT_DASHBOARD_AUTH_DISABLED=1 jobhunt-linkedin
+```

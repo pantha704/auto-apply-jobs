@@ -21,7 +21,6 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/jobhunt
-ReadOnlyPaths=/var/lib/jobhunt/apply_queue.db
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
