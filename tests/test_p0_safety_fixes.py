@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from unittest.mock import patch
 from workflow.recovery import ActionCandidate, ActionRisk
 from workflow.terminal_guard import (
     TerminalActionGuard,
@@ -12,6 +13,32 @@ from workflow.terminal_guard import (
 
 class TestTerminalActionGuard:
     """Tests for F08: Terminal action guard."""
+
+    @pytest.fixture(autouse=True)
+    def _sending_enabled(self):
+        # R1: the guard checks the live sending gate first. These tests
+        # verify intent/label/role logic, so bypass the gate hermetically
+        # (never touch the operator's real pause flag).
+        with patch("workflow.farm_control.can_send", return_value=True):
+            yield
+
+    def test_guard_blocks_when_sending_disabled(self):
+        guard = TerminalActionGuard()
+        request = TerminalActionRequest(
+            intent="submit",
+            candidate_id="c0",
+            label="Submit application",
+            role="button",
+            portal="wellfound",
+            session_id="wf-w1",
+        )
+        candidates = [ActionCandidate("c0", "button", "Submit application")]
+        with patch("workflow.farm_control.can_send", return_value=False), patch(
+            "workflow.farm_control.pause_reason", return_value="test pause"
+        ), patch("workflow.farm_control.is_paused", return_value=True):
+            result = guard.validate(request, candidates)
+        assert not result.allowed
+        assert "sending blocked" in result.reason
 
     def test_guard_rejects_non_terminal_intent(self):
         guard = TerminalActionGuard()
