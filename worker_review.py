@@ -156,6 +156,9 @@ def review(job):
     # F04: Check if this is a prior uncertain submission.
     # If so, only reconcile — never re-send.
     is_uncertain_prior = any(job["prev"].startswith(u) for u in UNCERTAIN_SUBMISSION)
+    if is_uncertain_prior:
+        # R2: never re-click submit after uncertain prior. Durable reconcile only.
+        return mark(job["id"], "skip", "reviewed|needs-reconciliation")
 
     attempts = 0
     while attempts < 2:

@@ -478,10 +478,8 @@ def _apply_one(url, expected_session_revision=None):
                     if combo.count() and ("select" in combo_txt or not combo_txt.strip()):
                         combo.click(timeout=4000)
                         page.wait_for_timeout(1200)
-                        # prefer an exact "1 year" option; else the first numeric option
+                        # R6: only exact approved-years option. No first-option fallback.
                         opt = page.locator("[role=option]:has-text('1 year'), [role=option]:has-text('1 Year')").first
-                        if opt.count() == 0:
-                            opt = page.locator("[role=option]").first
                         if opt.count() and opt.is_visible():
                             opt.click(timeout=4000)
             except Exception:

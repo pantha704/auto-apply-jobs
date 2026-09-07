@@ -29,9 +29,9 @@ clean:  ## Remove caches and temp files
 docker:  ## Build the Docker image
 	docker build -t jobhunt-linkedin .
 
-docker-run:  ## Run the dashboard in Docker (port 8787)
-	docker run --rm -p 8787:8787 \
-		-e JOBHUNT_DASHBOARD_AUTH_DISABLED=1 \
+docker-run:  ## Run the dashboard in Docker (dev only, loopback, auth on)
+	docker run --rm -p 127.0.0.1:8787:8787 \
+		-v jobhunt-state:/var/lib/jobhunt \
 		jobhunt-linkedin
 
 dashboard:  ## Start the local dashboard (no auth, port 8787)

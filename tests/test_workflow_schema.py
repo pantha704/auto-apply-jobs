@@ -47,7 +47,7 @@ def test_queue_migration_is_versioned_idempotent_and_preserves_legacy_rows(tmp_p
     path = tmp_path / "queue.db"
     legacy_queue(path)
 
-    assert migrate_queue(path) == [1, 2, 3, 4]
+    assert migrate_queue(path) == [1, 2, 3, 4, 5]
     assert migrate_queue(path) == []
 
     db = sqlite3.connect(path)
@@ -58,12 +58,15 @@ def test_queue_migration_is_versioned_idempotent_and_preserves_legacy_rows(tmp_p
         "attempt_count",
         "next_attempt_at",
         "last_outcome_code",
+        "location",
+        "company",
+        "prio",
     } <= columns
     assert db.execute("SELECT id, status FROM jobs").fetchall() == [("job-1", "pending")]
     assert db.execute("SELECT status FROM applications").fetchall() == [("submitted",)]
     assert db.execute(
         "SELECT version FROM schema_migrations WHERE database_name='queue'"
-    ).fetchall() == [(1,), (2,), (3,), (4,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,)]
     db.close()
 
 

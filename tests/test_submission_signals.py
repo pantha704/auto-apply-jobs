@@ -33,6 +33,6 @@ def test_http_statuses_are_ignored_body_text_is_required():
 
 
 def test_internshala_records_after_submit_screenshot_on_confirmed_apply():
-    text = Path("/home/ubuntu/job_hunt_linkedin/worker_internshala.py").read_text()
+    text = (Path(__file__).resolve().parents[1] / "worker_internshala.py").read_text()
     assert "record_submission_proof(" in text
     assert 'status_if_confirmed="applied"' in text

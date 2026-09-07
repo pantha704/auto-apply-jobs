@@ -63,57 +63,24 @@ def read_only_tools():
 
 
 async def analyze(cdp_url: str, request: dict) -> Proposal:
-    from browser_use import Agent, Browser, ChatOpenAI
-    
-    # F09 fix: Default to inventory-only model invocation
-    model = os.environ.get("BROWSER_USE_MODEL", "local-inventory-only")
-    base_url = os.environ.get("BROWSER_USE_LLM_BASE_URL", "http://127.0.0.1:4000/v1")
-    api_key = (
-        os.environ.get("BROWSER_USE_LLM_API_KEY")
-        or os.environ.get("LITELLM_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-        or "local-router"
-    )
-    
-    # F09 fix: Redact candidates before sending to provider
+    # R8: inventory-only. No live browser, no DOM, no Agent.
+    # cdp_url accepted for API compat but never dialed.
+    _ = cdp_url
     candidates = request.get("candidates") or []
-    redacted_candidates = _redact_candidates(candidates)
-    allowed_ids = [item.get("candidate_id") for item in candidates]
-    
-    task = (
-        "READ-ONLY ANALYSIS. Do not click, type, scroll, navigate, submit, send, or change the page. "
-        "Inspect the current complex job-application page as visual/DOM context. Choose at most one "
-        "candidate_id from the supplied sanitized inventory that best matches the requested low-risk "
-        "navigation intent. If uncertain, if the page asks for credentials/CAPTCHA, or if the action "
-        "could submit/send/finalize an application, return candidate_id=null.\n"
-        + json.dumps(
-            {
-                "intent": request.get("intent"),
-                "allowed_candidate_ids": allowed_ids,
-                "candidates": redacted_candidates,
-            },
-            separators=(",", ":"),
-        )
-    )
-    browser = Browser(cdp_url=cdp_url, keep_alive=True)
-    llm = ChatOpenAI(model=model, base_url=base_url, api_key=api_key)
-    agent = Agent(
-        task=task,
-        llm=llm,
-        browser=browser,
-        tools=read_only_tools(),
-        output_model_schema=Proposal,
-        use_vision=False,  # F09 fix: Default to non-vision for safety
-        max_actions_per_step=1,
-    )
-    history = await agent.run(max_steps=2)
-    structured = history.structured_output
-    if structured is not None:
-        return Proposal.model_validate(structured)
-    final = history.final_result()
-    if not final:
+    intent = str(request.get("intent") or "").lower()
+    if intent in {"submit", "send", "finalize", "confirm"}:
         return Proposal(candidate_id=None)
-    return Proposal.model_validate_json(final)
+    allowed = {c.get("candidate_id") for c in candidates if c.get("candidate_id")}
+    if len(allowed) != 1:
+        return Proposal(candidate_id=None)
+    only = next(iter(allowed))
+    label = ""
+    for c in candidates:
+        if c.get("candidate_id") == only:
+            label = str(c.get("label") or "")
+    if any(k in label.lower() for k in ("submit", "send", "final", "confirm", "apply")):
+        return Proposal(candidate_id=None)
+    return Proposal(candidate_id=only)
 
 
 def main() -> int:

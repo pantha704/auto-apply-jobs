@@ -241,14 +241,14 @@ def answer_page(page):
                 elif "unique" in low: val = PROFILE_DATA["pitch"]
                 elif "start" in low:
                     if ANSWERS_REPO:
-                        val = ANSWERS_REPO.lookup("preference.start_date", {})
+                        val = ANSWERS_REPO.lookup("preference.start_date", {"portal": "linkedin"})
                     if not val:
-                        val = "Immediate"
+                        val = None  # R6: no fabricated Immediate
                 elif "skills" in low:
                     if ANSWERS_REPO:
-                        val = ANSWERS_REPO.lookup("preference.skills_count", {})
+                        val = ANSWERS_REPO.lookup("preference.skills_count", {"portal": "linkedin"})
                     if not val:
-                        val = "4"
+                        val = None  # R6: no fabricated count
                 elif "gpa" in low: val = ""  # skip GPA
                 elif "experience" in low or "years" in low:
                     if any(k in low for k in ZERO_TOPICS): val = "0"

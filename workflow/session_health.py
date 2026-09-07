@@ -126,14 +126,18 @@ class VersionScopedProbes:
             db.execute("BEGIN IMMEDIATE")
             
             # Update version-scoped probe
-            db.execute(
+            cur = db.execute(
                 """UPDATE portal_session_versions
                    SET probe_state=?, probe_at=?, safe_detail=?
                    WHERE id=? AND portal=? AND lifecycle='candidate'""",
                 (state, now, safe_detail, version_id, portal),
             )
-            
-            # Update portal_sessions only for state tracking, not version
+            if cur.rowcount != 1:
+                # R7: stale/unknown version — do not touch portal-wide health.
+                db.rollback()
+                return
+
+            # Update portal_sessions only when version probe actually applied.
             db.execute(
                 """UPDATE portal_sessions 
                    SET state=?, last_probe_at=?,

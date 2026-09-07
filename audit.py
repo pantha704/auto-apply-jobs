@@ -219,16 +219,55 @@ class SubmissionFinalizer:
         note: str = "",
         snap_before=None,
         snap_after=None,
+        worker_id: str | None = None,
+        fence_token: str | None = None,
     ) -> None:
         """Atomically update queue status and write audit record."""
         c = sqlite3.connect(self._db_path, timeout=10)
         try:
             c.execute("BEGIN IMMEDIATE")
-            # 1. Update jobs table (replaces mark())
-            c.execute(
-                "UPDATE jobs SET status=?, result=? WHERE id=?",
-                (status, result[:200], job_id),
-            )
+            # R9: ensure audit table exists on migrated queues.
+            c.execute("""CREATE TABLE IF NOT EXISTS applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                portal TEXT NOT NULL, company TEXT, role TEXT, url TEXT NOT NULL,
+                applied_at TEXT NOT NULL, answers TEXT, resume_used TEXT,
+                status TEXT, note TEXT, snap_before TEXT, snap_after TEXT,
+                url_hash TEXT, UNIQUE(portal, url_hash))""")
+            # R9: tolerate legacy test DBs missing fence columns.
+            cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)")}
+            if "claimed_by" not in cols:
+                c.execute("ALTER TABLE jobs ADD COLUMN claimed_by TEXT")
+            if "last_fence_token" not in cols:
+                c.execute("ALTER TABLE jobs ADD COLUMN last_fence_token TEXT")
+            # R9: validate owned job exists. Reject orphans.
+            job = c.execute(
+                "SELECT id, portal, status, claimed_by, last_fence_token FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if not job:
+                raise ValueError(f"finalize refused: unknown job {job_id}")
+            if worker_id:
+                if job[3] != worker_id:
+                    raise ValueError(f"finalize refused: job {job_id} owned by {job[3]} not {worker_id}")
+                if fence_token and job[4] and fence_token != job[4]:
+                    raise ValueError(f"finalize refused: stale fence for job {job_id}")
+            # R9: normalize legacy outcomes (reviewed|submit-unconfirmed etc).
+            norm_result = (result or "").strip()
+            if "submit-unconfirmed" in norm_result and status == "done":
+                raise ValueError("finalize refused: uncertain outcome cannot become done")
+            # 1. Update jobs table with ownership guard when worker known.
+            if worker_id:
+                cur = c.execute(
+                    "UPDATE jobs SET status=?, result=? WHERE id=? AND claimed_by=?",
+                    (status, norm_result[:200], job_id, worker_id),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError(f"finalize refused: lost ownership for job {job_id}")
+            else:
+                c.execute(
+                    "UPDATE jobs SET status=?, result=? WHERE id=?",
+                    (status, norm_result[:200], job_id),
+                )
             # 2. Write audit record to applications table
             uh = hashlib.sha1(canonical(url).encode()).hexdigest() if url else ""
             exists = c.execute(
@@ -237,7 +276,10 @@ class SubmissionFinalizer:
             ).fetchone() if uh else None
             now = datetime.now(timezone.utc).isoformat()
             if exists:
-                if exists[1] == "submit-unconfirmed" and audit_status in {
+                # R9: normalize legacy exact-string bug (reviewed|submit-unconfirmed etc).
+                prev = (exists[1] or "")
+                prev_base = prev.split("|")[-1].strip()
+                if prev_base in {"submit-unconfirmed", "submitted-unconfirmed", "send-unconfirmed"} and audit_status in {
                     "applied",
                     "submitted",
                 }:

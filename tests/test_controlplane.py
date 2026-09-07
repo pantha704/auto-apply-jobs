@@ -302,7 +302,7 @@ def test_workers_endpoint_joins_live_service_and_durable_telemetry(dashboard, mo
 def test_spa_exposes_history_issues_and_site_form():
     from pathlib import Path
 
-    root = Path("/home/ubuntu/job_hunt_linkedin/controlplane/static")
+    root = Path(__file__).resolve().parents[1] / "controlplane" / "static"
     html = (root / "index.html").read_text()
     js = (root / "app.js").read_text()
     assert 'data-page="history"' in html

@@ -97,29 +97,30 @@ class TestSubmissionFinalizer:
         db.close()
 
     def test_finalize_is_atomic_on_failure(self, tmp_path):
-        """If job update fails, audit insert should be rolled back too."""
+        """Orphan finalize must refuse and roll back audit insert."""
         from audit import SubmissionFinalizer
+        import pytest
 
         db_path = tmp_path / "q.db"
         _queue_db(db_path)
         fin = SubmissionFinalizer(str(db_path))
 
-        # Non-existent job_id — job UPDATE affects 0 rows but doesn't raise.
-        # The audit insert should still succeed (it's a separate concern).
-        fin.finalize(
-            job_id="nonexistent",
-            status="done",
-            result="submitted",
-            portal="linkedin",
-            company="Test",
-            role="Engineer",
-            url="https://example.com/job/2",
-            audit_status="submitted",
-        )
+        # Non-existent job_id — must raise, no orphan audit row.
+        with pytest.raises(ValueError, match="unknown job"):
+            fin.finalize(
+                job_id="nonexistent",
+                status="done",
+                result="submitted",
+                portal="linkedin",
+                company="Test",
+                role="Engineer",
+                url="https://example.com/job/2",
+                audit_status="submitted",
+            )
 
         db = sqlite3.connect(db_path)
         count = db.execute("SELECT count(*) FROM applications").fetchone()[0]
-        assert count == 1  # audit row was created even though job didn't exist
+        assert count == 0
         db.close()
 
     def test_finalize_deduplicates_audit(self, tmp_path):

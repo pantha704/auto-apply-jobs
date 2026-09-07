@@ -118,6 +118,9 @@ def pin_claim(
     - Attempt count increment
     - Claim timestamp
     - Owner token for conditional mutations
+
+    R5: caller must retain fence via fence_token_for() and pass it to
+    guarded transitions. finalize/mark paths must verify owner+fence.
     """
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
@@ -156,6 +159,41 @@ def pin_claim(
         ),
     )
     return updated.rowcount
+
+
+def fence_token_for(db: sqlite3.Connection, job_id: str, worker_id: str) -> str | None:
+    """Return current fence token for owner, else None. R5 enforcement helper."""
+    row = db.execute(
+        "SELECT last_fence_token FROM jobs WHERE id=? AND claimed_by=?",
+        (job_id, worker_id),
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def check_fence(db: sqlite3.Connection, job_id: str, worker_id: str, fence_token: str | None) -> bool:
+    """True iff job still owned by worker with matching fence and live lease."""
+    if not fence_token:
+        return False
+    row = db.execute(
+        "SELECT claimed_by, last_fence_token, lease_expires_at, status FROM jobs WHERE id=?",
+        (job_id,),
+    ).fetchone()
+    if not row:
+        return False
+    owner, token, lease_exp, status = row
+    if owner != worker_id or token != fence_token:
+        return False
+    if status != "claimed":
+        return False
+    if lease_exp:
+        try:
+            from datetime import datetime as _dt
+
+            if _dt.fromisoformat(lease_exp) < _dt.now(timezone.utc):
+                return False
+        except ValueError:
+            return False
+    return True
 
 
 def eligible_for_claim(runtime: PublishedApplicationRuntime, job: Mapping[str, Any]) -> bool:

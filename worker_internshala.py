@@ -185,6 +185,12 @@ def upload_resume(page):
         return False
 
 def submit(page):
+    from workflow.farm_control import require_can_send, SendingBlocked
+    try:
+        require_can_send("internshala")
+    except SendingBlocked as e:
+        log(f"sending blocked — submit refused: {e}")
+        return False
     if dynamic_ui.click(page, "internshala", "submit", timeout_ms=8000):
         log("clicked trusted submit intent")
         return True
@@ -352,13 +358,11 @@ def run_once():
                     mark(job["id"], "done", "applied")
                     log("APPLIED")
                 else:
-                    fails[job["id"]] = fails.get(job["id"], 0) + 1
-                    if fails[job["id"]] >= 2:
-                        mark(job["id"], "skip", "submit-unconfirmed")
-                        log("skip: submit unconfirmed after retries")
-                    else:
-                        mark(job["id"], "pending", "submit-unconfirmed")
-                        log("submit clicked but confirmation missing; requeued")
+                    # R2: submit was clicked — outcome uncertain. Never requeue
+                    # to pending (would resend on next loop). Durable skip for
+                    # reconciliation only.
+                    mark(job["id"], "skip", "submit-unconfirmed")
+                    log("skip: submit unconfirmed — no resend, needs reconciliation")
             except Exception as e:
                 log(f"error on {job['title'][:40]}: {e}")
                 fails[job["id"]] = fails.get(job["id"], 0) + 1

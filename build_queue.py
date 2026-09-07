@@ -16,7 +16,9 @@ def main():
     conn = sqlite3.connect(DB)
     conn.execute("""CREATE TABLE jobs (
         id TEXT PRIMARY KEY, portal TEXT, url TEXT, title TEXT,
-        source TEXT, status TEXT DEFAULT 'pending', claimed_by TEXT, result TEXT)""")
+        source TEXT, status TEXT DEFAULT 'pending', claimed_by TEXT, result TEXT,
+        location TEXT NOT NULL DEFAULT '', company TEXT NOT NULL DEFAULT '',
+        prio INTEGER NOT NULL DEFAULT 0)""")
     jobs = {}
 
     # exclude already-handled links

@@ -63,6 +63,18 @@ class TerminalActionGuard:
         candidates: Sequence[ActionCandidate],
     ) -> TerminalActionResult:
         """Validate a terminal action request against candidates and context."""
+        # R1: sending gate controls every terminal action, including guard path.
+        try:
+            from .farm_control import can_send, sending_disabled_reason, is_paused, pause_reason
+
+            if not can_send():
+                reason = pause_reason() or sending_disabled_reason() or "sending disabled"
+                _paused = is_paused()
+                return TerminalActionResult(
+                    False, f"sending blocked ({'paused' if _paused else 'disabled'}): {reason[:80]}"
+                )
+        except ImportError:
+            pass
         # 1. Intent must be terminal
         if request.intent.lower() not in _TERMINAL_INTENTS:
             return TerminalActionResult(

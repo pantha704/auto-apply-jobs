@@ -66,6 +66,8 @@ def create_release_bundle(
     claim_token: str,
 ) -> ReleaseBundle:
     """Create an immutable release bundle from claim-time data."""
+    from types import MappingProxyType
+
     return ReleaseBundle(
         portal=portal,
         profile_id=profile_id,
@@ -75,8 +77,8 @@ def create_release_bundle(
         preference_set_id=preference_set_id,
         preference_set_version=preference_set_version,
         session_revision=session_revision,
-        session_state=dict(session_state),
-        facts=dict(facts),
+        session_state=MappingProxyType(dict(session_state)),
+        facts=MappingProxyType(dict(facts)),
         claim_id=claim_id,
         claim_token=claim_token,
     )

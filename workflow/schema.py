@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-QUEUE_VERSION = 4
+QUEUE_VERSION = 5
 CONTROL_VERSION = 7
 
 
@@ -64,6 +64,9 @@ def migrate_queue(path: str | Path) -> list[int]:
                 "preference_score": "REAL",
                 "eligibility": "INTEGER CHECK(eligibility IS NULL OR eligibility IN (0,1))",
                 "evaluation_code": "TEXT",
+                "location": "TEXT NOT NULL DEFAULT ''",
+                "company": "TEXT NOT NULL DEFAULT ''",
+                "prio": "INTEGER NOT NULL DEFAULT 0",
             }
             for name, declaration in additions.items():
                 if name not in columns:
@@ -292,6 +295,29 @@ def migrate_queue(path: str | Path) -> list[int]:
                 (4, _now()),
             )
             applied.append(4)
+        if 5 not in seen:
+            # R3: worker claim projection needs location/company/prio on legacy DBs.
+            job_columns = _columns(db, "jobs")
+            job_additions = {
+                "location": "TEXT NOT NULL DEFAULT ''",
+                "company": "TEXT NOT NULL DEFAULT ''",
+                "prio": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, declaration in job_additions.items():
+                if name not in job_columns:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+            _execute_script(
+                db,
+                """
+                CREATE INDEX IF NOT EXISTS idx_jobs_portal_pending
+                  ON jobs(portal, status, prio DESC);
+                """,
+            )
+            db.execute(
+                "INSERT INTO schema_migrations(database_name,version,applied_at) VALUES('queue',?,?)",
+                (5, _now()),
+            )
+            applied.append(5)
         db.commit()
         return applied
     except Exception:

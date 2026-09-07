@@ -102,3 +102,16 @@ def sending_disabled_reason() -> str:
     if SENDING_GATE.is_file():
         return SENDING_GATE.read_text(encoding="utf-8").strip() or "sending disabled"
     return ""
+
+
+class SendingBlocked(RuntimeError):
+    """Raised when a terminal action is attempted while sending is blocked."""
+
+
+def require_can_send(portal: str = "") -> None:
+    """Enforce sending gate. Raise SendingBlocked if paused or sending disabled."""
+    if is_paused():
+        raise SendingBlocked(f"sending blocked: farm paused ({pause_reason()}) portal={portal}")
+    reason = sending_disabled_reason()
+    if reason:
+        raise SendingBlocked(f"sending blocked: {reason} portal={portal}")
