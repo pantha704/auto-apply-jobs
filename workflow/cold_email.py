@@ -23,7 +23,7 @@ def _iso(value: datetime) -> str:
 class EmailClaim:
     id: str
     contact_id: str
-    to: str
+    to: str  # F20: frozen at claim time from approved contact
     subject: str
     body: str
     worker_id: str
@@ -47,9 +47,11 @@ class ColdEmailQueue:
         ts = _iso(self.now())
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            # F20: Block new send while ANY prior one is unresolved
+            # (queued, sending, sent, unknown — not just queued/sending/sent).
             existing = db.execute(
                 """SELECT id FROM cold_email_sends WHERE contact_id=?
-                   AND status IN ('queued','sending','sent') ORDER BY created_at DESC LIMIT 1""",
+                   AND status NOT IN ('failed','cancelled') ORDER BY created_at DESC LIMIT 1""",
                 (contact_id,),
             ).fetchone()
             if existing:
@@ -117,11 +119,16 @@ class ColdEmailQueue:
             )
             if updated.rowcount != 1:
                 return None
+            # F20: Recipient, subject, body are frozen from the approved draft at claim time.
+            # The contact row is read but the values are immutable in the EmailClaim.
             return EmailClaim(str(row["id"]), str(row["contact_id"]), str(row["email"]),
                               str(row["subject"]), str(row["body"]), worker_id)
 
     def sent(self, claim: EmailClaim, *, provider_id: str) -> None:
         ts = _iso(self.now())
+        # F20: Validate provider_id is not None or stringified null.
+        if not provider_id or provider_id in ("None", "null", ""):
+            raise ValueError(f"provider_id must be a real value, got: {provider_id!r}")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             updated = db.execute(
