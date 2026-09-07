@@ -5,7 +5,9 @@ Deterministic, zero-cost layer:
   - extract skills from job text and diff against LO's real stack
   - generate an honest, tailored cover note (never claims what LO lacks)
   - hard-skip only clearly impossible roles (zero overlap + senior, citizens-only, clearance)
-LO-approved answer bank lives in audit.PROFILE; this module only phrases, never invents.
+# F01 fix: audit.PROFILE was removed. Candidate facts come from
+# workflow.application_gate.published_runtime() and AnswerRepository.
+# This module only phrases, never invents.
 """
 import re, random
 
