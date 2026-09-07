@@ -178,6 +178,13 @@ class WorkflowStore:
     ) -> None:
         if outcome.code is OutcomeCode.SUBMITTED:
             raise ValueError("submitted outcomes require confirm_submission()")
+
+        # F04 fix: CONFIRMATION_AMBIGUOUS outcomes are never retryable.
+        # An uncertain result means we don't know if the remote accepted it.
+        # Making it retryable risks duplicate submissions.
+        if outcome.code is OutcomeCode.CONFIRMATION_AMBIGUOUS:
+            object.__setattr__(outcome, "retryable", False)
+
         finished_at = _iso(self.now())
         legacy_status, legacy_result = _legacy(outcome)
         db = self._connect()

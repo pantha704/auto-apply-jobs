@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import secrets
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -105,15 +107,44 @@ def pin_claim(
     job_id: str,
     worker_id: str,
     runtime: PublishedApplicationRuntime,
+    *,
+    lease_seconds: int = 600,
 ) -> int:
-    """Claim one already-selected job and atomically persist immutable pins."""
+    """Claim one already-selected job and atomically persist immutable pins.
+
+    F03 fix: Creates a durable lease with:
+    - Timed lease expiry (default 10 minutes)
+    - Random fencing token (prevents stale-worker writes)
+    - Attempt count increment
+    - Claim timestamp
+    - Owner token for conditional mutations
+    """
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    lease_expires = (now + timedelta(seconds=lease_seconds)).isoformat()
+    fence_token = secrets.token_urlsafe(32)
+
     updated = db.execute(
-        """UPDATE jobs SET status='claimed',claimed_by=?,candidate_profile_id=?,
-           candidate_profile_revision=?,resume_version_id=?,preference_set_id=?,
-           preference_set_version=?,portal_session_revision=?
-           WHERE id=? AND status='pending'""",
+        """UPDATE jobs SET
+           status='claimed',
+           claimed_by=?,
+           claimed_at=?,
+           lease_expires_at=?,
+           attempt_count=COALESCE(attempt_count, 0) + 1,
+           last_fence_token=?,
+           candidate_profile_id=?,
+           candidate_profile_revision=?,
+           resume_version_id=?,
+           preference_set_id=?,
+           preference_set_version=?,
+           portal_session_revision=?
+           WHERE id=? AND (status='pending' OR
+             (status='claimed' AND lease_expires_at < ?))""",
         (
             worker_id,
+            now_iso,
+            lease_expires,
+            fence_token,
             runtime.profile_id,
             runtime.profile_revision,
             runtime.resume_id,
@@ -121,16 +152,22 @@ def pin_claim(
             runtime.preference_set.version,
             runtime.session_revision,
             job_id,
+            now_iso,
         ),
     )
     return updated.rowcount
 
 
 def eligible_for_claim(runtime: PublishedApplicationRuntime, job: Mapping[str, Any]) -> bool:
+    """F07 fix: Evaluate against full normalized job facts, not just title+portal."""
     enriched = dict(job)
+    # Ensure salary_min is populated from title extraction if missing.
     if enriched.get("salary_min") in (None, ""):
         pay = extract_monthly_pay_inr(str(enriched.get("title") or ""))
         if pay is not None:
             enriched["salary_min"] = pay
+    # Ensure location is available for policy checks.
+    if not enriched.get("location") and not enriched.get("location_raw"):
+        enriched["location"] = ""
     result = runtime.evaluate(enriched)
     return result.eligible and not result.needs_review

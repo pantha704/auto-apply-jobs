@@ -182,25 +182,14 @@ def record_submission_proof(
         application_id=rid,
     )
 
-# Honest answer bank (never invent beyond this). Identity from profile_local / env.
-import profile as ident
-PROFILE = {
-    "name": ident.NAME,
-    "email": ident.EMAIL,
-    "phone": ident.PHONE,
-    "address": ident.ADDRESS,
-    "city": ident.CITY, "state": ident.STATE, "pin": ident.PIN,
-    "linkedin": "https://www.linkedin.com/in/pantha704",
-    "portfolio": "https://pantha704.github.io",
-    "college": ident.COLLEGE,
-    "expected_lpa": "700000", "current_lpa": "480000", "notice": "0",
-    "years": "1",
-    "work_auth_us": "No",
-    "sponsorship": "Yes",  # requires visa sponsorship — honest Yes on sponsor questions
-    "relocate": "No",
-    "education_completed": "No",
-    "excel_years": "1",
-    "note": "Full-stack engineer (TypeScript/Python/Rust) with 1 year of experience, based in Kolkata, open to remote roles.",
-    "stack": "TypeScript, JavaScript, Python, Rust, Node.js, Next.js, React, Tailwind CSS, PostgreSQL, Prisma, Redis, Docker, Solana/Anchor, REST APIs, WebSockets",
-    "resume": os.environ.get("JOBHUNT_RESUME", os.path.join(HERE, "resume.pdf")),
-}
+# F01 fix: Hardcoded PROFILE dict removed. Workers MUST use
+# workflow.application_gate.published_runtime() and workflow.answers.AnswerRepository
+# for all candidate facts. The old PROFILE dict allowed workers to bypass the
+# approved release bundle, leading to incorrect submitted answers.
+#
+# If you need candidate facts, use:
+#   from workflow.application_gate import published_runtime
+#   runtime = published_runtime(portal, required_fact_groups)
+#   runtime.fact("name")  # approved fact
+#
+# Legacy code that references audit.PROFILE will get a clear ImportError.

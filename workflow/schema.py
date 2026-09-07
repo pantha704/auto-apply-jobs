@@ -276,6 +276,22 @@ def migrate_queue(path: str | Path) -> list[int]:
                 (3, _now()),
             )
             applied.append(3)
+        if 4 not in seen:
+            # F03/F15: Add columns for durable lease fencing and admin reset tracking.
+            job_columns = _columns(db, "jobs")
+            job_additions = {
+                "last_fence_token": "TEXT",
+                "admin_reset_at": "TEXT",
+                "admin_reset_reason": "TEXT",
+            }
+            for name, declaration in job_additions.items():
+                if name not in job_columns:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+            db.execute(
+                "INSERT INTO schema_migrations(database_name,version,applied_at) VALUES('queue',?,?)",
+                (4, _now()),
+            )
+            applied.append(4)
         db.commit()
         return applied
     except Exception:
