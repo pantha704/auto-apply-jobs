@@ -170,6 +170,33 @@ def fence_token_for(db: sqlite3.Connection, job_id: str, worker_id: str) -> str 
     return row[0] if row and row[0] else None
 
 
+# B3/B6: in-memory claim registry. Workers record the fence token and release
+# bundle at claim time; mark()/finalize paths consume them without threading
+# new arguments through every call site. The DB remains authoritative —
+# guarded_mark/finalize re-validate against stored state.
+_CLAIM_REGISTRY: dict[str, dict] = {}
+
+
+def remember_claim(job_id: str | int, *, fence_token: str = "", bundle=None) -> None:
+    """Record claim-time fence + bundle for this process's owned job."""
+    _CLAIM_REGISTRY[str(job_id)] = {"fence_token": fence_token or "", "bundle": bundle}
+
+
+def claim_fence(job_id: str | int) -> str:
+    """Fence token recorded at claim time, or empty string."""
+    return _CLAIM_REGISTRY.get(str(job_id), {}).get("fence_token") or ""
+
+
+def claim_bundle(job_id: str | int):
+    """Release bundle recorded at claim time, or None."""
+    return _CLAIM_REGISTRY.get(str(job_id), {}).get("bundle")
+
+
+def forget_claim(job_id: str | int) -> None:
+    """Drop claim-time state after the job reaches a terminal outcome."""
+    _CLAIM_REGISTRY.pop(str(job_id), None)
+
+
 def check_fence(db: sqlite3.Connection, job_id: str, worker_id: str, fence_token: str | None) -> bool:
     """True iff job still owned by worker with matching fence and live lease."""
     if not fence_token:
@@ -209,12 +236,44 @@ def guarded_mark(
     R5: all worker mark() paths must go through here. If fence_token given,
     it must match; otherwise ownership alone is required. Uncertain post-send
     outcomes can never return to pending.
+
+    B4: the uncertain check reads STORED history (result + last_outcome_code),
+    not just the incoming text — exception/watchdog paths that report generic
+    reasons (browser-wedge-timeout, hard-timeout) cannot requeue a job whose
+    stored history shows a post-send attempt.
+
+    B3: when the stored row carries a fence token, the caller must present the
+    matching token. Ownership alone is not enough.
     """
     result = (result or "")[:200]
-    if "submit-unconfirmed" in result or "send-unconfirmed" in result:
-        if status == "pending":
-            raise ValueError("guarded_mark refused: uncertain post-send cannot requeue")
-    if fence_token:
+    stored = db.execute(
+        "SELECT result, last_outcome_code, status, claimed_by, last_fence_token"
+        " FROM jobs WHERE id=?",
+        (job_id,),
+    ).fetchone()
+    if stored is None:
+        return 0
+    stored_result, stored_outcome, stored_status, stored_owner, stored_fence = stored
+    if stored_owner != worker_id:
+        return 0
+    text = f"{stored_result or ''} {stored_outcome or ''} {result}".lower()
+    post_send = (
+        "submit-unconfirmed" in text
+        or "send-unconfirmed" in text
+        or "submitted-unconfirmed" in text
+        or "submitted" in text
+        or "applied" in text
+    )
+    if post_send and status == "pending":
+        raise ValueError("guarded_mark refused: stored post-send history cannot requeue")
+    if stored_fence:
+        if not fence_token or fence_token != stored_fence:
+            return 0
+        cur = db.execute(
+            "UPDATE jobs SET status=?, result=? WHERE id=? AND claimed_by=? AND last_fence_token=?",
+            (status, result, job_id, worker_id, fence_token),
+        )
+        return cur.rowcount
         cur = db.execute(
             "UPDATE jobs SET status=?, result=? WHERE id=? AND claimed_by=? AND last_fence_token=?",
             (status, result, job_id, worker_id, fence_token),

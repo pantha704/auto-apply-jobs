@@ -69,6 +69,9 @@ def validate_action_candidate(candidate: dict, controls: list[dict], *, intent: 
         raise ValueError("LLM cannot choose a submit/send/finalize control")
     # R1: intent/label must agree in both directions. A non-terminal intent
     # aimed at a terminal-labeled control is a bypass (Next -> Submit).
+    # Resolve FIRST: the raw candidate carries only candidate_id, so the
+    # bypass check must inspect the resolved control, not the request.
+    resolved = validate_candidate(candidate, controls)
     import re as _re
     _terminal_label = _re.compile(
         r"\b(?:submit|send|finali[sz]e|confirm)\b.*\b(?:application|message|email)?\b|"
@@ -76,13 +79,11 @@ def validate_action_candidate(candidate: dict, controls: list[dict], *, intent: 
         r"\bapply\s+now\b",
         _re.IGNORECASE,
     )
-    _label = str((candidate or {}).get("name") or (candidate or {}).get("text") or "")
+    _label = str(resolved.get("name") or resolved.get("text") or "")
     _is_terminal_label = bool(_label and _terminal_label.search(_label))
     _is_terminal_intent = intent in {"submit", "send", "finalize"}
     if _is_terminal_label and not _is_terminal_intent:
         raise ValueError(f"intent '{intent}' does not match terminal label '{_label[:50]}'")
-    
-    resolved = validate_candidate(candidate, controls)
     
     # F08 fix: For terminal actions, validate label + context + role all match
     if intent in {"submit", "send", "finalize"}:

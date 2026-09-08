@@ -49,6 +49,25 @@ class ReleaseBundle:
             raise TypeError(f"release bundle fact must be boolean: {aliases[0]}")
         return value
 
+    def matches_runtime(self, runtime) -> bool:
+        """True iff the live approved release still equals the frozen bundle.
+
+        B6: call at dispatch, before browser work. A profile/resume/policy
+        change or approval revocation between claim and apply invalidates the
+        prepared run — the job goes back for re-planning, never sends stale
+        facts. Duck-typed on runtime to avoid an import cycle.
+        """
+        try:
+            return (
+                str(runtime.profile_id) == self.profile_id
+                and int(runtime.profile_revision) == self.profile_revision
+                and str(runtime.resume_id) == self.resume_id
+                and str(runtime.preference_set.id) == self.preference_set_id
+                and int(runtime.preference_set.version) == self.preference_set_version
+            )
+        except (AttributeError, TypeError, ValueError):
+            return False
+
 
 def create_release_bundle(
     *,

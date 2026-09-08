@@ -240,34 +240,32 @@ class SubmissionFinalizer:
             if "last_fence_token" not in cols:
                 c.execute("ALTER TABLE jobs ADD COLUMN last_fence_token TEXT")
             # R9: validate owned job exists. Reject orphans.
+            # B3: worker_id is mandatory — ownerless finalization is refused.
+            # When the stored row carries a fence token, the caller must present
+            # the matching token; ownership alone is not enough.
             job = c.execute(
                 "SELECT id, portal, status, claimed_by, last_fence_token FROM jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
             if not job:
                 raise ValueError(f"finalize refused: unknown job {job_id}")
-            if worker_id:
-                if job[3] != worker_id:
-                    raise ValueError(f"finalize refused: job {job_id} owned by {job[3]} not {worker_id}")
-                if fence_token and job[4] and fence_token != job[4]:
-                    raise ValueError(f"finalize refused: stale fence for job {job_id}")
+            if not worker_id:
+                raise ValueError(f"finalize refused: worker_id required for job {job_id}")
+            if job[3] != worker_id:
+                raise ValueError(f"finalize refused: job {job_id} owned by {job[3]} not {worker_id}")
+            if job[4] and fence_token != job[4]:
+                raise ValueError(f"finalize refused: stale fence for job {job_id}")
             # R9: normalize legacy outcomes (reviewed|submit-unconfirmed etc).
             norm_result = (result or "").strip()
             if "submit-unconfirmed" in norm_result and status == "done":
                 raise ValueError("finalize refused: uncertain outcome cannot become done")
-            # 1. Update jobs table with ownership guard when worker known.
-            if worker_id:
-                cur = c.execute(
-                    "UPDATE jobs SET status=?, result=? WHERE id=? AND claimed_by=?",
-                    (status, norm_result[:200], job_id, worker_id),
-                )
-                if cur.rowcount != 1:
-                    raise ValueError(f"finalize refused: lost ownership for job {job_id}")
-            else:
-                c.execute(
-                    "UPDATE jobs SET status=?, result=? WHERE id=?",
-                    (status, norm_result[:200], job_id),
-                )
+            # 1. Update jobs table — ownership already verified above.
+            cur = c.execute(
+                "UPDATE jobs SET status=?, result=? WHERE id=? AND claimed_by=?",
+                (status, norm_result[:200], job_id, worker_id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError(f"finalize refused: lost ownership for job {job_id}")
             # 2. Write audit record to applications table
             uh = hashlib.sha1(canonical(url).encode()).hexdigest() if url else ""
             exists = c.execute(

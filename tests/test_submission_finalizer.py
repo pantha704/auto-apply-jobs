@@ -30,8 +30,8 @@ def _queue_db(path: Path) -> None:
         )"""
     )
     db.execute(
-        "INSERT INTO jobs(id,portal,url,title,status) "
-        "VALUES('j1','linkedin','https://example.com/job/1','Engineer','pending')"
+        "INSERT INTO jobs(id,portal,url,title,status,claimed_by) "
+        "VALUES('j1','linkedin','https://example.com/job/1','Engineer','claimed','li-w1')"
     )
     db.commit()
     db.close()
@@ -47,6 +47,7 @@ class TestSubmissionFinalizer:
 
         fin.finalize(
             job_id="j1",
+            worker_id="li-w1",
             status="done",
             result="submitted",
             portal="linkedin",
@@ -80,6 +81,7 @@ class TestSubmissionFinalizer:
 
         fin.finalize(
             job_id="j1",
+            worker_id="li-w1",
             status="skip",
             result="closed",
             portal="linkedin",
@@ -109,6 +111,7 @@ class TestSubmissionFinalizer:
         with pytest.raises(ValueError, match="unknown job"):
             fin.finalize(
                 job_id="nonexistent",
+                worker_id="li-w1",
                 status="done",
                 result="submitted",
                 portal="linkedin",
@@ -133,6 +136,7 @@ class TestSubmissionFinalizer:
 
         fin.finalize(
             job_id="j1",
+            worker_id="li-w1",
             status="done",
             result="submitted",
             portal="linkedin",
@@ -143,6 +147,7 @@ class TestSubmissionFinalizer:
         )
         fin.finalize(
             job_id="j1",
+            worker_id="li-w1",
             status="done",
             result="submitted",
             portal="linkedin",
@@ -170,6 +175,7 @@ class TestSubmissionFinalizer:
 
         fin.finalize(
             job_id="j1",
+            worker_id="li-w1",
             status="done",
             result="submitted",
             portal="linkedin",

@@ -96,19 +96,27 @@ def claim_ambiguous():
         c.commit(); c.close()
         telemetry().outcome(row[0], "skip", "policy-ineligible")
         return claim_ambiguous()
+    import secrets as _secrets
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    from workflow.application_gate import remember_claim
+    _rev_fence = _secrets.token_urlsafe(32)
+    _rev_lease = (_dt.now(_tz.utc) + _td(minutes=10)).isoformat()
     upd = c.execute(
         f"""UPDATE jobs SET status='claimed',claimed_by=?,result='reviewing',
             candidate_profile_id=?,candidate_profile_revision=?,resume_version_id=?,
-            preference_set_id=?,preference_set_version=?,portal_session_revision=?
+            preference_set_id=?,preference_set_version=?,portal_session_revision=?,
+            last_fence_token=?,lease_expires_at=?
             WHERE id=? AND status='skip' AND ({like}) AND result NOT LIKE 'reviewed%'
             AND {uncertain_like}""",
         [WORKER_ID, runtime.profile_id, runtime.profile_revision, runtime.resume_id,
          runtime.preference_set.id, runtime.preference_set.version, runtime.session_revision,
+         _rev_fence, _rev_lease,
          row[0]] + [f"{a}%" for a in AMBIGUOUS] + [f"{a}%" for a in UNCERTAIN_SUBMISSION]
     )
     c.commit(); c.close()
     if upd.rowcount != 1:
         return claim_ambiguous()
+    remember_claim(row[0], fence_token=_rev_fence)
     telemetry().claimed(row[0])
     return {"id": row[0], "url": row[1], "title": row[2], "portal": row[3],
             "prev": row[4], "runtime": runtime}
@@ -143,10 +151,15 @@ def _reconcile_uncertain(c: sqlite3.Connection) -> None:
 
 
 def mark(jid, status, result):
+    from workflow.application_gate import guarded_mark, claim_fence
     c = db()
-    c.execute("UPDATE jobs SET status=?, result=? WHERE id=?", (status, result[:250], jid))
+    # B3/B4: owner + fence checked, stored post-send history blocks requeue.
+    rows = guarded_mark(c, jid, WORKER_ID, status, result,
+                        fence_token=claim_fence(jid) or None)
     c.commit()
     c.close()
+    if not rows:
+        log(f"mark lost ownership for {jid} — leaving to current owner")
     telemetry().outcome(jid, status, result)
 
 
@@ -201,9 +214,12 @@ def review(job):
 
 def audit_record(job, url, note):
     from audit import SubmissionFinalizer
+    from workflow.application_gate import claim_fence
     _fin = SubmissionFinalizer(QUEUE_DB)
     _fin.finalize(
         job_id=job["id"],
+        worker_id=WORKER_ID,
+        fence_token=claim_fence(job["id"]) or None,
         status="done",
         result="reviewed|submitted",
         portal="yc",

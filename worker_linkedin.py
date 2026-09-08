@@ -116,8 +116,10 @@ def claim(portal, runtime):
         upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
         try:
             from workflow.release_bundle import build_from_runtime
+            from workflow.application_gate import remember_claim
             _fence = fence_token_for(c, row[0], WORKER_ID) or ""
             _bundle = build_from_runtime("linkedin", runtime, row[0], _fence)
+            remember_claim(row[0], fence_token=_fence, bundle=_bundle)
         except Exception:
             _bundle, _fence = None, ""
         c.commit(); c.close()
@@ -127,9 +129,13 @@ def claim(portal, runtime):
 
 def mark(jid, status, result=""):
     c = db()
-    from workflow.application_gate import guarded_mark
-    guarded_mark(c, jid, WORKER_ID, status, result)
+    from workflow.application_gate import guarded_mark, fence_token_for
+    # B3: resolve our fence and present it — ownerless writes are refused.
+    rows = guarded_mark(c, jid, WORKER_ID, status, result,
+                        fence_token=fence_token_for(c, jid, WORKER_ID))
     c.commit(); c.close()
+    if not rows:
+        log(f"mark lost ownership for {jid} ({status}|{result[:60]}) — leaving to current owner")
     telemetry().outcome(jid, status, result)
 
 def log(msg):
@@ -286,6 +292,15 @@ def main():
             time.sleep(60)
             continue
         log(f"claim: {job['title'][:60]}")
+        # B6: the bundle frozen at claim must still match the live approved
+        # release — a profile/resume/policy change in between invalidates the run.
+        from workflow.application_gate import claim_bundle
+        _bundle = claim_bundle(job["id"])
+        if _bundle is not None and not _bundle.matches_runtime(runtime):
+            mark(job["id"], "pending", "release|approved-release-changed")
+            log("release changed since claim — job returned for re-planning")
+            time.sleep(2)
+            continue
         GUARD = BrowserWatchdog(f"li_w_{WORKER_ID}", max_sec=240, job=(job["id"], job["url"]))
         GUARD.start()
         try:
@@ -309,9 +324,12 @@ def main():
             log("BROWSER WEDGE — job requeued, exiting for systemd restart")
             os._exit(7)
         from audit import SubmissionFinalizer
+        from workflow.application_gate import claim_fence
         _fin = SubmissionFinalizer(DB)
         _fin.finalize(
             job_id=job["id"],
+            worker_id=WORKER_ID,
+            fence_token=claim_fence(job["id"]) or None,
             status="done" if ok[0] else "skip",
             result=ok[1],
             portal="linkedin",
@@ -558,6 +576,10 @@ def hybrid_modal_click(page, intents):
 
 
 def click_terminal_submit(page):
+    from workflow.farm_control import can_send
+    if not can_send():
+        log("sending blocked (paused/disabled) — refusing terminal submit click")
+        return False
     for lab in ["^Submit application$"]:
         try:
             page.get_by_role("button", name=re.compile(lab, re.I)).first.click(timeout=3000)
