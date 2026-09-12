@@ -171,7 +171,8 @@ They must **sleep on empty**, not `sys.exit`. Exit + `Restart=always` = restart 
 
 ### 4.6 `worker_review.py` (`jobhunt-review@r1`)
 - Second pass on ambiguous skips: `submit-unconfirmed`, `no-apply-modal`, `fill-err`, …
-- Re-runs real apply entry, marks `reviewed|<reason>`.
+- Marks ambiguous work `needs-reconciliation`; never re-runs the application entry.
+- See `PRODUCTION_EXECUTION.md` for the durable submission boundary and release limits.
 
 ### 4.7 `worker_guard.py`
 - Daemon thread: if a job exceeds `max_sec`, SIGKILL browser tree + worker so systemd restarts.

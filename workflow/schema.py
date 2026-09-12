@@ -4,8 +4,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-QUEUE_VERSION = 5
-CONTROL_VERSION = 7
+QUEUE_VERSION = 6
+CONTROL_VERSION = 8
 
 
 def _now() -> str:
@@ -51,6 +51,10 @@ def migrate_queue(path: str | Path) -> list[int]:
                 "SELECT version FROM schema_migrations WHERE database_name='queue'"
             )
         }
+        db.execute("""CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY, portal TEXT, url TEXT, title TEXT, source TEXT,
+            status TEXT DEFAULT 'pending', claimed_by TEXT, result TEXT,
+            prio INTEGER NOT NULL DEFAULT 0, posted_at TEXT, fetched_at TEXT)""")
         if 1 not in seen:
             columns = _columns(db, "jobs")
             additions = {
@@ -318,6 +322,28 @@ def migrate_queue(path: str | Path) -> list[int]:
                 (5, _now()),
             )
             applied.append(5)
+        if 6 not in seen:
+            db.execute("""CREATE TABLE submission_intents (
+                id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE,
+                application_key TEXT NOT NULL UNIQUE, worker_id TEXT NOT NULL,
+                fence_token TEXT NOT NULL, created_at TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('unknown','verified','confirmed')),
+                evidence_json TEXT, FOREIGN KEY(job_id) REFERENCES jobs(id))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,portal TEXT NOT NULL,
+                company TEXT,role TEXT,url TEXT NOT NULL,applied_at TEXT NOT NULL,
+                answers TEXT,resume_used TEXT,status TEXT,note TEXT,
+                snap_before TEXT,snap_after TEXT,url_hash TEXT,UNIQUE(portal,url_hash))""")
+            columns = _columns(db, 'applications')
+            for name in ('company','role','answers','resume_used','note','snap_before','snap_after','url_hash'):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE applications ADD COLUMN {name} TEXT")
+            db.execute("""CREATE TRIGGER prevent_dispatched_requeue
+                BEFORE UPDATE OF status ON jobs WHEN NEW.status='pending' AND EXISTS
+                (SELECT 1 FROM submission_intents WHERE job_id=OLD.id)
+                BEGIN SELECT RAISE(ABORT,'dispatched job requires reconciliation'); END""")
+            db.execute("INSERT INTO schema_migrations VALUES('queue',6,?)", (_now(),))
+            applied.append(6)
         db.commit()
         return applied
     except Exception:
@@ -917,6 +943,12 @@ def migrate_control(path: str | Path) -> list[int]:
                 (7, _now()),
             )
             applied.append(7)
+        if 8 not in seen:
+            db.execute('ALTER TABLE cold_email_sends ADD COLUMN approved_recipient TEXT')
+            db.execute('ALTER TABLE cold_email_sends ADD COLUMN attempt_token TEXT')
+            db.execute("UPDATE cold_email_sends SET status='cancelled',error='recipient_reapproval_required' WHERE status='queued'")
+            db.execute("INSERT INTO schema_migrations VALUES('control',8,?)",(_now(),))
+            applied.append(8)
         db.commit()
         return applied
     except Exception:

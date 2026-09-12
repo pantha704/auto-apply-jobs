@@ -53,8 +53,9 @@ def _portal_state(portal: str, url: str, title: str, body: str, error: bool) -> 
     if state != "valid":
         return state
     _, expected_host, expected_path = PROBES[portal]
-    low_url = url.lower()
-    if expected_host not in low_url or expected_path not in low_url:
+    from urllib.parse import urlsplit
+    parsed=urlsplit(url); host=(parsed.hostname or '').lower()
+    if not (host==expected_host or host.endswith('.'+expected_host)) or not parsed.path.startswith(expected_path):
         return "unknown"
     if portal == "himalayas":
         low_body = body.lower()
@@ -101,7 +102,7 @@ def probe_one(browser, manager, portal: str) -> str:
                 context.close()
             except Exception:
                 pass
-    manager.record_health(portal, state, detail)
+    manager.record_health(portal, state, detail, version_id=snapshot.version_id)
     return state
 
 

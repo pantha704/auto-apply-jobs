@@ -47,7 +47,7 @@ def test_queue_migration_is_versioned_idempotent_and_preserves_legacy_rows(tmp_p
     path = tmp_path / "queue.db"
     legacy_queue(path)
 
-    assert migrate_queue(path) == [1, 2, 3, 4, 5]
+    assert migrate_queue(path) == [1, 2, 3, 4, 5, 6]
     assert migrate_queue(path) == []
 
     db = sqlite3.connect(path)
@@ -66,7 +66,7 @@ def test_queue_migration_is_versioned_idempotent_and_preserves_legacy_rows(tmp_p
     assert db.execute("SELECT status FROM applications").fetchall() == [("submitted",)]
     assert db.execute(
         "SELECT version FROM schema_migrations WHERE database_name='queue'"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,)]
     db.close()
 
 
@@ -192,7 +192,7 @@ def test_control_migration_creates_onboarding_and_recipe_schema(tmp_path):
     path = tmp_path / "control.db"
     legacy_control(path)
 
-    assert migrate_control(path) == [1, 2, 3, 4, 5, 6, 7]
+    assert migrate_control(path) == [1, 2, 3, 4, 5, 6, 7, 8]
     assert migrate_control(path) == []
 
     db = sqlite3.connect(path)
@@ -226,7 +226,7 @@ def test_control_migration_creates_onboarding_and_recipe_schema(tmp_path):
     ]
     assert db.execute(
         "SELECT version FROM schema_migrations WHERE database_name='control' ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]
     send_columns = {
         row[1] for row in db.execute("PRAGMA table_info(cold_email_sends)")
     }

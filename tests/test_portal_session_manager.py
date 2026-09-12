@@ -113,7 +113,7 @@ def test_control_v7_creates_versioned_session_schema(tmp_path):
 
     path = tmp_path / "control.db"
     legacy_control(path)
-    assert migrate_control(path) == [1, 2, 3, 4, 5, 6, 7]
+    assert migrate_control(path) == [1, 2, 3, 4, 5, 6, 7, 8]
     assert migrate_control(path) == []
     with sqlite3.connect(path) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -224,5 +224,5 @@ def test_probe_classification_distinguishes_challenge_expiry_and_unknown():
 
     assert classify_probe("https://site.test/cdn-cgi/challenge-platform", "Just a moment", "verify you are human") == "challenged"
     assert classify_probe("https://site.test/login", "Sign in", "Welcome") == "expired"
-    assert classify_probe("https://site.test/account", "Account", "Dashboard") == "valid"
+    assert classify_probe("https://site.test/account", "Account", "Account settings - Log out") == "valid"
     assert classify_probe("", "", "", network_error=True) == "unknown"

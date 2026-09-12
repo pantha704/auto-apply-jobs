@@ -27,7 +27,7 @@ from workflow.portal_session_runtime import (
 from title_filter import title_rejection_reason
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
+from workflow.browser_config import BROWSER_EXECUTABLE as CLOAK
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "ext-w1"
 QUEUE_DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
 STATE_ROOT = os.getenv("JOBHUNT_STATE_ROOT", os.path.join(HERE, "state_queue"))
@@ -59,7 +59,7 @@ def telemetry():
 def claim(runtime):
     while True:
         c = db()
-        row = c.execute("SELECT id, url, title, source FROM jobs WHERE portal='external' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
+        row = c.execute("SELECT id, url, title, source FROM jobs WHERE portal='external' AND status='pending' AND (eligibility IS NULL OR eligibility=1) ORDER BY prio DESC, rowid LIMIT 1").fetchone()
         if not row:
             c.close(); telemetry().idle(); return None
         source = (row[3] or "").lower()
@@ -70,20 +70,7 @@ def claim(runtime):
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", reason)
             continue
-        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "external", "source": row[3] or ""}):
-            c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
-            c.commit(); c.close()
-            telemetry().outcome(row[0], "skip", "policy-ineligible")
-            continue
         upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
-        try:
-            from workflow.release_bundle import build_from_runtime
-            from workflow.application_gate import remember_claim
-            _fence = fence_token_for(c, row[0], WORKER_ID) or ""
-            _bundle = build_from_runtime("external", runtime, row[0], _fence)
-            remember_claim(row[0], fence_token=_fence, bundle=_bundle)
-        except Exception:
-            _bundle, _fence = None, ""
         c.commit(); c.close()
         if upd_count == 1:
             telemetry().claimed(row[0])
@@ -91,14 +78,16 @@ def claim(runtime):
 
 def mark(jid, status, result=""):
     c = db()
-    from workflow.application_gate import guarded_mark, fence_token_for
+    from workflow.application_gate import guarded_mark, claim_fence
     # B3: resolve our fence and present it — ownerless writes are refused.
     rows = guarded_mark(c, jid, WORKER_ID, status, result,
-                        fence_token=fence_token_for(c, jid, WORKER_ID))
+                        fence_token=claim_fence(jid))
+    actual = c.execute("SELECT status,result FROM jobs WHERE id=?", (jid,)).fetchone() if rows else None
     c.commit(); c.close()
     if not rows:
         print(f"mark lost ownership for {jid} — leaving to current owner", flush=True)
-    telemetry().outcome(jid, status, result)
+    if rows and actual:
+        telemetry().outcome(jid, actual[0], actual[1] or "")
 
 def route(job, expected_session_revision=None):
     src = (job.get("source") or "").lower()

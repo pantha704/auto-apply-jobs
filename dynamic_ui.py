@@ -199,6 +199,8 @@ def resolve(page, portal: str, intent: str, timeout_ms: int = 2000):
     for spec in intents(portal, intent):
         for loc in _locators(page, spec):
             try:
+                if intent in {"submit","send","finalize","confirm"} and loc.count()!=1:
+                    continue
                 el = loc.first
                 if el.count() and el.is_visible():
                     return el
@@ -251,8 +253,15 @@ def _llm_transport(body: dict) -> dict:
 
 def click(page, portal: str, intent: str, timeout_ms: int = 3000) -> bool:
     """Click a trusted intent; optional LLM may choose only a low-risk candidate."""
+    terminal = intent in {'submit','send','confirm','finalize'}
+    if terminal:
+        from workflow.farm_control import require_can_send, SendingBlocked
+        try:
+            require_can_send(portal)
+        except SendingBlocked:
+            return False
     el = resolve(page, portal, intent, timeout_ms)
-    if el is None and intent not in {"submit", "send"}:
+    if el is None and not terminal:
         controls = snapshot_actionable_controls(page)
         try:
             candidate = llm_pick_candidate(controls, portal, intent, _llm_transport)
@@ -270,6 +279,9 @@ def click(page, portal: str, intent: str, timeout_ms: int = 3000) -> bool:
     if el is None:
         return False
     try:
+        if terminal:
+            from workflow.dispatch import terminal_click
+            return terminal_click(page,el,portal=portal,timeout_ms=timeout_ms)
         el.click(timeout=timeout_ms)
         return True
     except Exception:
@@ -416,7 +428,7 @@ def hybrid_click(page, portal: str, intent: str, cdp_url: str, *, postcondition=
         FileSessionLease(),
         Adapter(),
         BrowserUseSidecar(cdp_url),
-        recovery_mode="execute",
+        recovery_mode=os.getenv("JOBHUNT_RECOVERY_MODE","disabled"),
         recovery_verifier=lambda _context, _trace: verify_postcondition(),
     )
     result = router.run(

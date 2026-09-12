@@ -161,6 +161,12 @@ def record_submission_proof(
         os.chmod(after_png, 0o600)
     confirmed = bool(text_ok and png_ok)
     status = status_if_confirmed if confirmed else "submit-unconfirmed"
+    from workflow.application_gate import active_claim
+    entry=active_claim()
+    if entry and entry.get('database') and str(entry['job_id'])==str(job_id):
+        from workflow.dispatch import observe_confirmation
+        observe_confirmation(page,entry)
+        return SubmissionProof(confirmed,status,(before or {}).get('png'),after_png if png_ok else None,False,None)
     inserted, rid = record_application(
         portal,
         company,
@@ -255,9 +261,28 @@ class SubmissionFinalizer:
                 raise ValueError(f"finalize refused: job {job_id} owned by {job[3]} not {worker_id}")
             if job[4] and fence_token != job[4]:
                 raise ValueError(f"finalize refused: stale fence for job {job_id}")
+            tables = {row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if 'submission_intents' in tables:
+                stored_url = c.execute('SELECT url FROM jobs WHERE id=?',(job_id,)).fetchone()[0]
+                if portal!=job[1] or not url or canonical(url)!=canonical(stored_url):
+                    raise ValueError('finalize refused: application identity mismatch')
+                if job[2]!='claimed':
+                    raise ValueError('finalize refused: job is not claimed')
+                intent = c.execute('SELECT state,evidence_json FROM submission_intents WHERE job_id=? AND fence_token=?',(job_id,fence_token)).fetchone()
+                if audit_status in {'submitted','applied'}:
+                    if not intent or intent[0] not in {'verified','confirmed'}:
+                        status,result,audit_status='skip','unknown-outcome','submit-unconfirmed'
+                    else:
+                        from pathlib import Path
+                        proof=json.loads(intent[1]); snap_after=proof['artifact']
+                        if not _png_ok(snap_after) or hashlib.sha256(Path(snap_after).read_bytes()).hexdigest()!=proof['sha256']:
+                            raise ValueError('receipt artifact integrity failed')
+                        c.execute("UPDATE submission_intents SET state='confirmed' WHERE job_id=?",(job_id,))
+                elif intent:
+                    status,result,audit_status='skip','unknown-outcome','submit-unconfirmed'
             # R9: normalize legacy outcomes (reviewed|submit-unconfirmed etc).
             norm_result = (result or "").strip()
-            if "submit-unconfirmed" in norm_result and status == "done":
+            if status == "done" and any(marker in f"{norm_result} {audit_status}" for marker in ("unconfirmed", "unknown-outcome")):
                 raise ValueError("finalize refused: uncertain outcome cannot become done")
             # 1. Update jobs table — ownership already verified above.
             cur = c.execute(
@@ -266,6 +291,8 @@ class SubmissionFinalizer:
             )
             if cur.rowcount != 1:
                 raise ValueError(f"finalize refused: lost ownership for job {job_id}")
+            if "last_outcome_code" in cols:
+                c.execute("UPDATE jobs SET last_outcome_code=? WHERE id=?",(audit_status,job_id))
             # 2. Write audit record to applications table
             uh = hashlib.sha1(canonical(url).encode()).hexdigest() if url else ""
             exists = c.execute(
@@ -276,8 +303,8 @@ class SubmissionFinalizer:
             if exists:
                 # R9: normalize legacy exact-string bug (reviewed|submit-unconfirmed etc).
                 prev = (exists[1] or "")
-                prev_base = prev.split("|")[-1].strip()
-                if prev_base in {"submit-unconfirmed", "submitted-unconfirmed", "send-unconfirmed"} and audit_status in {
+                prev_base = prev.split("|")[-1].removeprefix("skipped:").strip()
+                if prev_base not in {"submitted", "applied"} and audit_status in {
                     "applied",
                     "submitted",
                 }:
@@ -324,7 +351,10 @@ class SubmissionFinalizer:
                         ),
                     )
                 except sqlite3.IntegrityError:
-                    pass  # duplicate — acceptable
+                    raise  # Preserve atomicity: constraint failures must roll back the queue.
+            if 'application_runs' in tables:
+                c.execute("UPDATE application_runs SET state='finished',finished_at=?,outcome_code=?,confirmed=? WHERE job_id=? AND lease_token=? AND state='running'",(now,audit_status,int(audit_status in {'submitted','applied'}),job_id,fence_token))
+                c.execute('UPDATE job_attempts SET finished_at=?,outcome_code=? WHERE run_id IN (SELECT id FROM application_runs WHERE job_id=? AND lease_token=?) AND finished_at IS NULL',(now,audit_status,job_id,fence_token))
             c.commit()
         except Exception:
             c.rollback()

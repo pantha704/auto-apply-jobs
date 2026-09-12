@@ -137,7 +137,7 @@ class TestSubmissionFinalizer:
         fin.finalize(
             job_id="j1",
             worker_id="li-w1",
-            status="done",
+            status="skip",
             result="submitted",
             portal="linkedin",
             company="Acme",

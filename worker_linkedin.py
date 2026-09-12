@@ -28,7 +28,7 @@ from worker_guard import BrowserWatchdog
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
-CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
+from workflow.browser_config import BROWSER_EXECUTABLE as CLOAK
 RESUME = ""
 LAST_SNAPS = {"before": None, "after": None}
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "li-w1"
@@ -99,7 +99,7 @@ def telemetry():
 def claim(portal, runtime):
     while True:
         c = db()
-        row = c.execute("SELECT id, url, title, location, company FROM jobs WHERE portal=? AND status='pending' ORDER BY prio DESC, rowid LIMIT 1", (portal,)).fetchone()
+        row = c.execute("SELECT id, url, title, location, company FROM jobs WHERE portal=? AND status='pending' AND (eligibility IS NULL OR eligibility=1) ORDER BY prio DESC, rowid LIMIT 1", (portal,)).fetchone()
         if not row:
             c.close(); telemetry().idle(); return None
         reason = title_rejection_reason(row[2] or "", "linkedin")
@@ -108,20 +108,7 @@ def claim(portal, runtime):
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", reason)
             continue
-        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": portal, "location": row[3] or "", "company": row[4] or ""}):
-            c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
-            c.commit(); c.close()
-            telemetry().outcome(row[0], "skip", "policy-ineligible")
-            continue
         upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
-        try:
-            from workflow.release_bundle import build_from_runtime
-            from workflow.application_gate import remember_claim
-            _fence = fence_token_for(c, row[0], WORKER_ID) or ""
-            _bundle = build_from_runtime("linkedin", runtime, row[0], _fence)
-            remember_claim(row[0], fence_token=_fence, bundle=_bundle)
-        except Exception:
-            _bundle, _fence = None, ""
         c.commit(); c.close()
         if upd_count == 1:
             telemetry().claimed(row[0])
@@ -129,14 +116,16 @@ def claim(portal, runtime):
 
 def mark(jid, status, result=""):
     c = db()
-    from workflow.application_gate import guarded_mark, fence_token_for
+    from workflow.application_gate import guarded_mark, claim_fence
     # B3: resolve our fence and present it — ownerless writes are refused.
     rows = guarded_mark(c, jid, WORKER_ID, status, result,
-                        fence_token=fence_token_for(c, jid, WORKER_ID))
+                        fence_token=claim_fence(jid))
+    actual = c.execute("SELECT status,result FROM jobs WHERE id=?", (jid,)).fetchone() if rows else None
     c.commit(); c.close()
     if not rows:
         log(f"mark lost ownership for {jid} ({status}|{result[:60]}) — leaving to current owner")
-    telemetry().outcome(jid, status, result)
+    if rows and actual:
+        telemetry().outcome(jid, actual[0], actual[1] or "")
 
 def log(msg):
     print(f"[{WORKER_ID}] {msg}", flush=True)
@@ -266,9 +255,10 @@ def answer_page(page):
                         val = None  # R6: no fabricated count
                 elif "gpa" in low: val = ""  # skip GPA
                 elif "experience" in low or "years" in low:
-                    if any(k in low for k in ZERO_TOPICS): val = "0"
-                    elif any(k in low for k in ONE_TOPICS): val = PROFILE_DATA["years"]
-                    else: val = None
+                    from workflow.form_answers import answer_for_question
+                    val=answer_for_question(lab,ANSWERS_REPO,portal="linkedin")
+                    if val is None and low.strip(' ?*') in {'years of experience','total years of experience'}:
+                        val=PROFILE_DATA['years']
                 if val is not None and f["value"] == "":
                     if js_text(page, lab, val): n += 1
     return n
@@ -411,14 +401,9 @@ def apply_job(url, expected_session_revision=None):
             has_submit = page.locator("button:has-text('Submit application')").count() > 0
             has_next = page.locator("button:has-text('Next')").count() > 0
             if has_submit and not has_next:
-                # ensure resume selected
-                page.evaluate("""() => {
-                  const rs=[...document.querySelectorAll('input[type=radio]')];
-                  if (rs.some(r=>r.checked)) return 'ok';
-                  const t=rs.find(r=>{let p=r.parentElement;for(let i=0;i<5&&p;i++){if((p.innerText||'').includes('Pratham_Jaiswal_Updated_Resume'))return true;p=p.parentElement;}return false;});
-                  if (t) t.click(); else if (rs.length) rs[0].click();
-                  return 'selected';
-                }""")
+                from workflow.form_answers import upload_approved_resume
+                if not upload_approved_resume(page, RESUME):
+                    return (False, "needs-review:approved-resume-upload")
                 page.wait_for_timeout(800)
                 try:
                     LAST_SNAPS["before"] = audit.snapshot(page, "linkedin", url, "before")
@@ -460,55 +445,16 @@ def apply_job(url, expected_session_revision=None):
             # resume page
             if not advance(page, "Next", "resume1"):
                 return (False, "resume-next-unavailable")
-            resume_ok = False
-            for sel_attempt in range(4):
-                page.evaluate("""() => {
-                  const rs=[...document.querySelectorAll('input[type=radio]')];
-                  if (rs.some(r=>r.checked)) return 'checked-ok';
-                  const t=rs.find(r=>{let p=r.parentElement;for(let i=0;i<6&&p;i++){if((p.innerText||'').includes('Pratham_Jaiswal_Updated_Resume'))return true;p=p.parentElement;}return false;});
-                  if (t) { t.click(); t.dispatchEvent(new Event('change',{bubbles:true})); const lab=t.closest('label'); if (lab) lab.click(); return 'clicked-ours'; }
-                  if (rs.length) { rs[0].click(); return 'clicked-first'; }
-                  return 'none';
-                }""")
-                page.wait_for_timeout(1300)
-                en = page.evaluate("""() => {
-                  const b=[...document.querySelectorAll('button')].find(x=>/^Next$/i.test((x.innerText||'').trim()));
-                  return b ? {disabled: !!b.disabled} : {missing: true};
-                }""")
-                if not en.get("missing") and not en.get("disabled"):
-                    resume_ok = True
-                    break
-            if not resume_ok:
-                diag = page.evaluate("""() => [...document.querySelectorAll('button')].map(b=>((b.innerText||'').trim().slice(0,22)+':'+(b.disabled?1:0))).filter(x=>x.includes('Next')||x.includes('Review')).join(' | ') || 'no-next'""")
-                return (False, "resume-stuck|" + diag[:100])
+            from workflow.form_answers import upload_approved_resume
+            if not upload_approved_resume(page, RESUME):
+                return (False, "needs-review:approved-resume-upload")
             if not hybrid_modal_click(page, ["next", "review"]):
                 return (False, "resume-advance-unavailable")
             if "Resume*" in page.inner_text("body")[:400]:
                 if not hybrid_modal_click(page, ["next", "review"]):
                     return (False, "resume-repeat-advance-unavailable")
-            # work-experience page: add entry if required
-            try:
-                if page.get_by_role("button", name=re.compile("^Add work experience$", re.I)).count():
-                    if not hybrid_modal_click(page, ["add_work_experience"]):
-                        return (False, "add-work-experience-unavailable")
-                    page.wait_for_timeout(1500)
-                    for q, v in [("Your title", "Full-Stack Developer"), ("Company", "Braid-Forbes Health Research")]:
-                        js_text(page, q, v)
-                    page.evaluate("""() => {
-                      const mod = document.querySelector('.jobs-easy-apply-modal, [role=dialog]') || document.body;
-                      const sels = [...mod.querySelectorAll('select')];
-                      if (sels[0]) { const o = [...sels[0].options].find(x=>x.text.trim()==='April'); if (o) { sels[0].value=o.value; sels[0].dispatchEvent(new Event('change',{bubbles:true})); } }
-                      if (sels[1]) { const o = [...sels[1].options].find(x=>x.text.trim()==='2026'); if (o) { sels[1].value=o.value; sels[1].dispatchEvent(new Event('change',{bubbles:true})); } }
-                      const cb = [...document.querySelectorAll('[role=checkbox]')].find(e => /currently work here/i.test(e.innerText||''));
-                      if (cb && cb.getAttribute('aria-checked') !== 'true') cb.click();
-                      return 'we-filled';
-                    }""")
-                    page.wait_for_timeout(800)
-                    if not hybrid_modal_click(page, ["save"]):
-                        return (False, "work-experience-save-unavailable")
-                    page.wait_for_timeout(1500)
-            except Exception:
-                pass
+            if page.get_by_role("button",name=re.compile("^Add work experience$",re.I)).count():
+                return (False,"needs-review:structured-work-history")
             # screening pages — auto answer, up to 6 pages
             for pg in range(6):
                 body = page.inner_text("body")
@@ -580,14 +526,7 @@ def click_terminal_submit(page):
     if not can_send():
         log("sending blocked (paused/disabled) — refusing terminal submit click")
         return False
-    for lab in ["^Submit application$"]:
-        try:
-            page.get_by_role("button", name=re.compile(lab, re.I)).first.click(timeout=3000)
-            page.wait_for_timeout(1000)
-            return True
-        except Exception:
-            continue
-    return False
+    return dynamic_ui.click(page,"linkedin","submit",timeout_ms=3000)
 
 if __name__ == "__main__":
     main()

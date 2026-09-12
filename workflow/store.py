@@ -54,6 +54,7 @@ class WorkflowStore:
         try:
             db.execute("BEGIN IMMEDIATE")
             where = "(status='pending' OR (status='claimed' AND lease_expires_at < ?))"
+            where += " AND (eligibility IS NULL OR eligibility=1) AND NOT EXISTS (SELECT 1 FROM submission_intents WHERE job_id=jobs.id)"
             params: list[object] = [current_iso]
             if portal:
                 where += " AND portal=?"

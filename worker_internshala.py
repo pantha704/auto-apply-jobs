@@ -32,7 +32,7 @@ from worker_guard import BrowserWatchdog
 from workflow.answers import AnswerRepository
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
+from workflow.browser_config import BROWSER_EXECUTABLE as CLOAK
 RESUME = ""
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "is-w1"
 QUEUE_DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
@@ -85,7 +85,7 @@ def telemetry():
 def claim(runtime):
     while True:
         c = db()
-        row = c.execute("SELECT id, url, title, location, company FROM jobs WHERE portal='internshala' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
+        row = c.execute("SELECT id, url, title, location, company FROM jobs WHERE portal='internshala' AND status='pending' AND (eligibility IS NULL OR eligibility=1) ORDER BY prio DESC, rowid LIMIT 1").fetchone()
         if not row:
             c.close(); telemetry().idle(); return None
         reason = title_rejection_reason(row[2] or "", "internshala")
@@ -94,20 +94,7 @@ def claim(runtime):
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", reason)
             continue
-        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "internshala", "location": row[3] or "", "company": row[4] or ""}):
-            c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
-            c.commit(); c.close()
-            telemetry().outcome(row[0], "skip", "policy-ineligible")
-            continue
         upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
-        try:
-            from workflow.release_bundle import build_from_runtime
-            from workflow.application_gate import remember_claim
-            _fence = fence_token_for(c, row[0], WORKER_ID) or ""
-            _bundle = build_from_runtime("internshala", runtime, row[0], _fence)
-            remember_claim(row[0], fence_token=_fence, bundle=_bundle)
-        except Exception:
-            _bundle, _fence = None, ""
         c.commit(); c.close()
         if upd_count == 1:
             telemetry().claimed(row[0])
@@ -115,14 +102,16 @@ def claim(runtime):
 
 def mark(jid, status, result=""):
     c = db()
-    from workflow.application_gate import guarded_mark, fence_token_for
+    from workflow.application_gate import guarded_mark, claim_fence
     # B3: resolve our fence and present it — ownerless writes are refused.
     rows = guarded_mark(c, jid, WORKER_ID, status, result,
-                        fence_token=fence_token_for(c, jid, WORKER_ID))
+                        fence_token=claim_fence(jid))
+    actual = c.execute("SELECT status,result FROM jobs WHERE id=?", (jid,)).fetchone() if rows else None
     c.commit(); c.close()
     if not rows:
         log(f"mark lost ownership for {jid} — leaving to current owner")
-    telemetry().outcome(jid, status, result)
+    if rows and actual:
+        telemetry().outcome(jid, actual[0], actual[1] or "")
 
 def applied_today():
     c = db()
@@ -138,56 +127,8 @@ def applied_today():
     c.close()
     return n2
 def fill_textareas(page, note):
-    """Fill employer questions honestly. Returns count filled."""
-    fields = page.evaluate("""() => {
-      const out = [];
-      for (const el of document.querySelectorAll('textarea')) {
-        if (el.offsetParent === null) continue;
-        let q = el.getAttribute('placeholder') || el.getAttribute('name') || '';
-        if (!q) {
-          const lab = el.closest('.form-group, .application_question') || el.parentElement;
-          q = (lab ? lab.innerText : '').replace(el.value||'','').trim().slice(0,120);
-        }
-        out.push({q: q.slice(0,150), val: el.value||''});
-      }
-      return out;
-    }""")
-    n = 0
-    for i, f in enumerate(fields):
-        if f["val"].strip():
-            continue
-        q = f["q"].lower()
-        # Check AnswerRepository first for typed dynamic answers
-        _repo_answer = None
-        if ANSWERS_REPO:
-            _repo_answer = ANSWERS_REPO.lookup("cover_note.default", {})
-        if i == 0:
-            text = _repo_answer or note
-        elif any(k in q for k in ["relocat", "location", "shift"]):
-            text = PROFILE_DATA["remote_statement"]
-        elif any(k in q for k in ["availab", "start", "joining", "immediate"]):
-            text = PROFILE_DATA["availability_statement"]
-        elif any(k in q for k in ["why", "suitable", "fit", "hire"]):
-            text = _repo_answer or note
-        elif any(k in q for k in ["experience", "skill"]):
-            text = PROFILE_DATA["years"] + " years of experience — " + PROFILE_DATA["stack"][:150] + "."
-        else:
-            text = _repo_answer or note
-        try:
-            page.evaluate(f"""() => {{
-              const els = [...document.querySelectorAll('textarea')].filter(e => e.offsetParent !== null);
-              const el = els[{i}];
-              if (!el) return false;
-              const proto = window.HTMLTextAreaElement.prototype;
-              Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, {json.dumps(text)});
-              el.dispatchEvent(new Event('input', {{bubbles:true}}));
-              el.dispatchEvent(new Event('change', {{bubbles:true}}));
-              return true;
-            }}""")
-            n += 1
-        except Exception:
-            pass
-    return n
+    from workflow.form_answers import fill_approved_questions
+    return 1 if fill_approved_questions(page,ANSWERS_REPO,portal='internshala',cover_note=note) else -1
 
 def upload_resume(page):
     try:
@@ -355,7 +296,13 @@ def run_once():
                 note = PROFILE_DATA["pitch"]
                 filled = fill_textareas(page, note)
                 log(f"filled {filled} question(s)")
-                upload_resume(page)
+                if filled<0:
+                    mark(job['id'],'skip','needs-review:unknown-question')
+                    continue
+                from workflow.form_answers import upload_approved_resume
+                if not upload_approved_resume(page,RESUME):
+                    mark(job['id'],'skip','needs-review:approved-resume-upload')
+                    continue
                 before_snap = audit.snapshot(page, "internshala", job["id"], "before_submit")
                 ok = submit(page)
                 if not ok:
@@ -381,7 +328,10 @@ def run_once():
                     already_before=before_snap,
                 )
                 if proof.confirmed:
-                    mark(job["id"], "done", "applied")
+                    from workflow.application_gate import claim_fence
+                    audit.SubmissionFinalizer(QUEUE_DB).finalize(job_id=job['id'],worker_id=WORKER_ID,
+                        fence_token=claim_fence(job['id']),status='done',result='applied',portal='internshala',
+                        url=job['url'],role=job['title'],resume_used=RESUME,audit_status='applied')
                     log("APPLIED")
                 else:
                     # R2: submit was clicked — outcome uncertain. Never requeue

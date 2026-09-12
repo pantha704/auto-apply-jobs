@@ -33,6 +33,7 @@ class ReleaseBundle:
     facts: Mapping[str, Any]
     claim_id: str
     claim_token: str
+    resume_sha256: str = ""
 
     def fact(self, *aliases: str) -> Any:
         """Get a profile fact by alias chain."""
@@ -64,6 +65,7 @@ class ReleaseBundle:
                 and str(runtime.resume_id) == self.resume_id
                 and str(runtime.preference_set.id) == self.preference_set_id
                 and int(runtime.preference_set.version) == self.preference_set_version
+                and int(getattr(runtime,"session_revision",0) or 0) == self.session_revision
             )
         except (AttributeError, TypeError, ValueError):
             return False
@@ -96,10 +98,11 @@ def create_release_bundle(
         preference_set_id=preference_set_id,
         preference_set_version=preference_set_version,
         session_revision=session_revision,
-        session_state=MappingProxyType(dict(session_state)),
-        facts=MappingProxyType(dict(facts)),
+        session_state=freeze(session_state),
+        facts=freeze(facts),
         claim_id=claim_id,
         claim_token=claim_token,
+        resume_sha256=resume_digest(resume_path),
     )
 
 
@@ -126,3 +129,18 @@ def build_from_runtime(portal: str, runtime, job_id: str, fence_token: str) -> R
         claim_id=str(job_id),
         claim_token=str(fence_token or ""),
     )
+
+
+def resume_digest(path):
+    import hashlib
+    from pathlib import Path
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest() if Path(path).is_file() else ""
+
+
+def freeze(value):
+    from types import MappingProxyType
+    if isinstance(value, Mapping):
+        return MappingProxyType({k:freeze(v) for k,v in value.items()})
+    if isinstance(value,(list,tuple)):
+        return tuple(freeze(v) for v in value)
+    return value

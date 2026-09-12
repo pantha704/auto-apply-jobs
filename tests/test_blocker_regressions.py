@@ -243,6 +243,7 @@ def test_bundle_matches_runtime():
         version = 3
 
     class Runtime:
+        session_revision = 7
         profile_id = "p-1"
         profile_revision = 2
         resume_id = "r-1"

@@ -164,52 +164,8 @@ def mark(jid, status, result):
 
 
 def review(job):
-    portal = job["portal"]
-    url = job["url"]
-    # F04: Check if this is a prior uncertain submission.
-    # If so, only reconcile — never re-send.
-    is_uncertain_prior = any(job["prev"].startswith(u) for u in UNCERTAIN_SUBMISSION)
-    if is_uncertain_prior:
-        # R2: never re-click submit after uncertain prior. Durable reconcile only.
-        return mark(job["id"], "skip", "reviewed|needs-reconciliation")
-
-    attempts = 0
-    while attempts < 2:
-        attempts += 1
-        try:
-            if portal == "wellfound":
-                ok, reason = ww.apply_one(url, expected_session_revision=job["runtime"].session_revision)
-                if ok:
-                    return mark(job["id"], "done", f"reviewed|{reason}")
-                # failed again — only retry on retryable-looking reasons
-                if "timeout" in reason.lower() or "error|" in reason:
-                    time.sleep(5)
-                    continue
-                return mark(job["id"], "skip", f"reviewed|{reason}")
-            if portal == "yc":
-                status, reason, note = wy.apply_url(url)
-                if status == "submitted":
-                    audit_record(job, url, note)
-                    return
-                if reason.startswith("error|") or "timeout" in reason.lower():
-                    time.sleep(5)
-                    continue
-                return mark(job["id"], "skip", f"reviewed|{reason}")
-            if portal == "external":
-                src = "weworkremotely" if "weworkremotely" in url else \
-                      "himalayas" if "himalayas" in url else "yc" if "workatastartup" in url else \
-                      "naukri" if "naukri" in url else "unknown"
-                ok, reason = wex.route({"url": url, "source": src}, job["runtime"].session_revision or None)
-                if ok:
-                    return mark(job["id"], "done", f"reviewed|{reason}")
-                return mark(job["id"], "skip", f"reviewed|{reason}")
-            return mark(job["id"], "skip", f"reviewed|no-handler:{portal}")
-        except Exception as e:
-            reason = f"error|{str(e)[:100]}"
-            if attempts == 2:
-                return mark(job["id"], "skip", f"reviewed|{reason}")
-            time.sleep(5)
-    mark(job["id"], "skip", "reviewed|gave-up")
+    """Ambiguous submissions require read-only reconciliation, never a second send."""
+    mark(job['id'],'skip','reviewed|needs-reconciliation')
 
 
 def audit_record(job, url, note):

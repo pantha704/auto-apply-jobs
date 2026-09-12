@@ -92,9 +92,9 @@ def test_auxiliary_workers_delegate_to_hybrid_enabled_apply_functions():
     recheck = (root / "worker_wf_recheck.py").read_text(encoding="utf-8")
     review = (root / "worker_review.py").read_text(encoding="utf-8")
     assert "ww.apply_one(" in recheck
-    assert "ww.apply_one(" in review
-    assert "wy.apply_url(" in review
-    assert "wex.route(" in review
+    assert "ww.apply_one(" not in review
+    assert "wy.apply_url(" not in review
+    assert "wex.route(" not in review
 
 
 @pytest.mark.parametrize("intent", ["submit", "send", "finalize"])
@@ -106,11 +106,11 @@ def test_hybrid_click_rejects_terminal_actions(intent):
 def test_linkedin_nonterminal_modal_steps_are_hybrid_but_submit_is_not():
     source = (Path(__file__).parents[1] / "worker_linkedin.py").read_text(encoding="utf-8")
     assert "def hybrid_modal_click" in source
-    for intent in ("next", "review", "save", "add_work_experience"):
+    for intent in ("next", "review"):
         assert f'"{intent}"' in source
     terminal = source[source.index("def click_terminal_submit"):]
     assert "dynamic_ui.hybrid_click" not in terminal
-    assert "Submit application" in terminal
+    assert 'dynamic_ui.click(page,"linkedin","submit"' in terminal
 
 
 def test_wellfound_sso_reentry_and_himalayas_upsell_use_hybrid():

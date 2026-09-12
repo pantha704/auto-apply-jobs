@@ -31,8 +31,6 @@ def test_r3_queue_version_includes_location_company_prio():
 def test_r4_reset_sql_valid():
     import pathlib
     sql = pathlib.Path('reset_claims.sh').read_text()
-    assert 'IS NOT IN' not in sql
-    assert 'NOT IN' in sql
-    # NULL-safe + portal scoping
-    assert 'IS NULL' in sql
-    assert 'portal' in sql.lower()
+    assert 'repair_expired' in sql
+    assert 'worker_id=sys.argv[1]' in sql and 'portal=sys.argv[2]' in sql
+    assert 'explicit repair reason' in sql

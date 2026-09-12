@@ -32,13 +32,17 @@ KEEP_ALIVE = ("jobhunt-dashboard.service",)
 
 
 def _systemctl(action: str, unit: str) -> str:
-    result = subprocess.run(
-        ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", action, unit],
-        capture_output=True,
-        text=True,
-        timeout=45,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", action, unit],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+    except (OSError,subprocess.TimeoutExpired):
+        return "error: service command unavailable or timed out"
+
     if result.returncode == 0:
         return action
     err = (result.stderr or result.stdout or "systemctl failed").strip()[:200]
@@ -46,13 +50,17 @@ def _systemctl(action: str, unit: str) -> str:
 
 
 def unit_active(unit: str) -> str:
-    result = subprocess.run(
-        ["/usr/bin/systemctl", "is-active", unit],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["/usr/bin/systemctl", "is-active", unit],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError,subprocess.TimeoutExpired):
+        return "error: service command unavailable or timed out"
+
     return (result.stdout or "unknown").strip() or "unknown"
 
 
@@ -72,7 +80,7 @@ def pause(reason: str | None = None) -> dict:
     units = {unit: _systemctl("stop", unit) for unit in APPLY_UNITS}
     preserved = assert_intact(before)
     return {
-        "ok": True,
+        "ok": all(value=="stop" for value in units.values()),
         "action": "pause",
         "flag": str(path),
         "sessions_preserved": preserved,
@@ -84,7 +92,7 @@ def pause(reason: str | None = None) -> dict:
 def resume() -> dict:
     cleared = clear_paused()
     units = {unit: _systemctl("start", unit) for unit in APPLY_UNITS}
-    return {"ok": True, "action": "resume", "cleared": cleared, **status(), "unit_results": units}
+    return {"ok": all(value=="start" for value in units.values()), "action": "resume", "cleared": cleared, **status(), "unit_results": units}
 
 
 def shutdown() -> dict:
@@ -93,8 +101,8 @@ def shutdown() -> dict:
     extras = {unit: _systemctl("stop", unit) for unit in SHUTDOWN_UNITS if unit != "jobhunt-dashboard.service"}
     delay = float(os.getenv("JOBHUNT_DASHBOARD_SHUTDOWN_DELAY", "2"))
 
-    def _stop_dashboard() -> None:
-        _systemctl("stop", "jobhunt-dashboard.service")
+    def _stop_dashboard() -> str:
+        return _systemctl("stop", "jobhunt-dashboard.service")
 
     if delay <= 0:
         extras["jobhunt-dashboard.service"] = _stop_dashboard() or "stop"
@@ -102,4 +110,4 @@ def shutdown() -> dict:
         extras["jobhunt-dashboard.service"] = f"scheduled {delay:.0f}s"
         threading.Timer(delay, _stop_dashboard).start()
     preserved = assert_intact(before)
-    return {**paused, "action": "shutdown", "extra_results": extras, "sessions_preserved": preserved}
+    return {**paused,"ok":paused["ok"] and all(not value.startswith("error:") for value in extras.values()),"action":"shutdown","extra_results":extras,"dashboard_stop_pending":delay>0,"sessions_preserved":preserved}

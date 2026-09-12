@@ -11,14 +11,9 @@ DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "apply_queue.db")
 
 
 def main():
-    if os.path.exists(DB):
-        os.remove(DB)
-    conn = sqlite3.connect(DB)
-    conn.execute("""CREATE TABLE jobs (
-        id TEXT PRIMARY KEY, portal TEXT, url TEXT, title TEXT,
-        source TEXT, status TEXT DEFAULT 'pending', claimed_by TEXT, result TEXT,
-        location TEXT NOT NULL DEFAULT '', company TEXT NOT NULL DEFAULT '',
-        prio INTEGER NOT NULL DEFAULT 0)""")
+    from workflow.schema import migrate_queue
+    migrate_queue(DB)
+    conn=sqlite3.connect(DB)
     jobs = {}
 
     # exclude already-handled links
@@ -38,7 +33,7 @@ def main():
         jobs[c] = (jid, portal, url, (title or "")[:120], source)
 
     # 1. LinkedIn targets (Kolkata/remote/India from full pool)
-    li = json.load(open("jobs_raw_r86400_india.json"))
+    li = json.load(open("jobs_raw_r86400_india.json")) if os.path.exists("jobs_raw_r86400_india.json") else {"jobs":[]}
     SEN = re.compile(r"\b(senior|lead|principal|staff|manager|director|head|architect|vp|chief|sr\.?)\b", re.I)
     for j in li["jobs"]:
         if SEN.search(j.get("title","")): continue
@@ -54,7 +49,7 @@ def main():
             add("indeed", j["link"], j["title"], "indeed")
 
     # 3. Naukri
-    sc = json.load(open("/tmp/site_collect.json"))
+    sc = json.load(open("/tmp/site_collect.json")) if os.path.exists("/tmp/site_collect.json") else []
     for s in sc:
         if s.get("site") == "naukri":
             for j in s["jobs"]:
