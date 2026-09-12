@@ -1629,7 +1629,7 @@ async def onboard_workflow_resume(request: Request) -> dict:
     _require_workflow()
     limit = 5 * 1024 * 1024
     try:
-        body = await request.body()
+        body = await _bounded_upload(request,limit+64*1024)
         if len(body) > limit + 64 * 1024:
             raise ValueError(f"multipart request exceeds {limit} byte file limit")
         filename, media_type, data = _multipart_file(request.headers.get("content-type", ""), body)
@@ -1639,35 +1639,26 @@ async def onboard_workflow_resume(request: Request) -> dict:
 
 
 def _multipart_file(content_type: str, body: bytes) -> tuple[str, str | None, bytes]:
-    """Extract the single `file` part without requiring an optional parser package."""
-    if not content_type.lower().startswith("multipart/form-data") or "boundary=" not in content_type:
-        raise ValueError("multipart/form-data with a boundary is required")
-    boundary = content_type.split("boundary=", 1)[1].strip().strip('"')
-    if not boundary or len(boundary) > 200:
-        raise ValueError("invalid multipart boundary")
-    marker = b"--" + boundary.encode("ascii", "strict")
-    for part in body.split(marker):
-        if b"\r\n\r\n" not in part:
-            continue
-        header_blob, payload = part.split(b"\r\n\r\n", 1)
-        headers = header_blob.decode("latin-1").lower()
-        if 'name="file"' not in headers:
-            continue
-        original_headers = header_blob.decode("latin-1")
-        filename = ""
-        disposition = next(
-            (line for line in original_headers.split("\r\n") if line.lower().startswith("content-disposition:")),
-            "",
-        )
-        for token in disposition.split(";"):
-            if token.strip().lower().startswith("filename="):
-                filename = token.split("=", 1)[1].strip().strip('"')
-        media_type = None
-        for line in original_headers.split("\r\n"):
-            if line.lower().startswith("content-type:"):
-                media_type = line.split(":", 1)[1].strip()
-        return filename, media_type, payload.removesuffix(b"\r\n").removesuffix(b"--")
-    raise ValueError("multipart request must contain one file field")
+    """Parse MIME boundaries without truncating the original file bytes."""
+    from email import policy
+    from email.parser import BytesParser
+    message=BytesParser(policy=policy.default).parsebytes(b'Content-Type: '+content_type.encode('ascii')+b'\r\nMIME-Version: 1.0\r\n\r\n'+body)
+    if message.get_content_type()!='multipart/form-data' or not message.is_multipart() or message.defects:
+        raise ValueError('valid multipart/form-data is required')
+    files=[part for part in message.iter_parts() if part.get_param('name',header='content-disposition')=='file']
+    if len(files)!=1 or files[0].is_multipart():
+        raise ValueError('multipart request must contain exactly one file field')
+    part=files[0]
+    return part.get_filename() or '',part.get_content_type(),part.get_payload(decode=True)
+
+
+async def _bounded_upload(request,limit):
+    result=bytearray()
+    async for chunk in request.stream():
+        if len(result)+len(chunk)>limit:
+            raise ValueError('multipart request exceeds upload limit')
+        result.extend(chunk)
+    return bytes(result)
 
 
 @app.post("/api/workflow/resumes", status_code=201)
@@ -1675,7 +1666,7 @@ async def upload_workflow_resume(request: Request) -> dict:
     _require_workflow()
     limit = 5 * 1024 * 1024
     try:
-        body = await request.body()
+        body = await _bounded_upload(request,limit+64*1024)
         if len(body) > limit + 64 * 1024:
             raise ValueError(f"multipart request exceeds {limit} byte file limit")
         filename, media_type, data = _multipart_file(request.headers.get("content-type", ""), body)

@@ -125,11 +125,20 @@ class AnswerRepository:
             ).fetchall()
         finally:
             db.close()
+        def _scope_sort_key(scope: dict, context: Mapping[str, Any]) -> tuple:
+            exact_count = sum(1 for v in scope.values() if v != "*")
+            has_any_exact = exact_count > 0
+            return (0 if has_any_exact else 1, -exact_count, len(scope))
+
+        candidates = []
         for row in rows:
             scope = json.loads(row["scope_json"])
             if all(value == "*" or context.get(key) == value for key, value in scope.items()):
-                return json.loads(self.fernet.decrypt(row["answer_enc"]).decode())
-        return None
+                candidates.append((row, scope))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: _scope_sort_key(item[1], context))
+        return json.loads(self.fernet.decrypt(candidates[0][0]["answer_enc"]).decode())
 
     def list_metadata(self) -> list[dict[str, Any]]:
         db = self._connect()

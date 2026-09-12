@@ -37,7 +37,11 @@ def current_session(portal: str) -> SessionSnapshot:
     if status["state"] != "valid" or status["current_revision"] is None:
         raise PortalSessionUnavailable(f"{portal} session is not valid")
     try:
-        return manager.load_current(portal)
+        snapshot=manager.load_revision(portal,status['current_revision'])
+        latest=manager.public_status(portal)
+        if latest['state']!='valid' or latest['current_revision']!=snapshot.revision:
+            raise PortalSessionUnavailable(f'{portal} session changed during load')
+        return snapshot
     except (OSError, RuntimeError, ValueError) as exc:
         raise PortalSessionUnavailable(f"{portal} session cannot be loaded") from exc
 
@@ -54,6 +58,12 @@ def inject_current_session(
     cookies = [cookie for cookie in snapshot.state.get("cookies", []) if cookie.get("name") and cookie.get("value")]
     if cookies:
         context.add_cookies(cookies)
+    origins=snapshot.state.get('origins',[])
+    if any(origin.get('indexedDB') for origin in origins):
+        raise PortalSessionUnavailable('IndexedDB requires a storage-state browser context')
+    if origins:
+        import json
+        context.add_init_script("""(() => { const origins = """ + json.dumps(origins) + """; const state = origins.find(item => item.origin === location.origin); if (state) for (const item of state.localStorage || []) localStorage.setItem(item.name,item.value); })();""")
     return snapshot.revision
 
 

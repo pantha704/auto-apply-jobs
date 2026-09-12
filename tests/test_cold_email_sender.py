@@ -21,7 +21,7 @@ def _schema(path):
               status TEXT, provider_id TEXT, error TEXT, created_at TEXT,
               body TEXT, approved_at TEXT, approved_by TEXT, claimed_by TEXT,
               claimed_at TEXT, lease_expires_at TEXT, attempt_count INTEGER DEFAULT 0,
-              next_attempt_at TEXT, sent_at TEXT, updated_at TEXT
+              next_attempt_at TEXT, sent_at TEXT, updated_at TEXT, approved_recipient TEXT, attempt_token TEXT
             );
             INSERT INTO cold_contacts VALUES(
               'c1','Acme','jobs@acme.test','t1','drafted','Engineer at Acme',

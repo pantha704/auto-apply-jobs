@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Browser-based job collector for JS-heavy sites: Web3.career, CryptoJobsList, Wellfound, RemoteOK."""
 from playwright.sync_api import sync_playwright
-import json, os
-os.environ.setdefault("TMPDIR", "/home/ubuntu/tmp_chrome")
-CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome", re, time
+import json, os, re, time, sys
+from workflow.browser_config import BROWSER_EXECUTABLE as CLOAK
 
 PROFILE = "/home/ubuntu/.config/google-chrome/Profile 4"
 OUT = "/tmp/site_jobs.json"

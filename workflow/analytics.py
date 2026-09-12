@@ -106,16 +106,33 @@ def aggregate_analytics(
             return " AND ".join(clauses), args
 
         confirmed_times: list[datetime] = []
-        # v2 is authoritative when available; legacy applications is the fallback.
+        run_count = 0
+        # Preserve historical confirmations when migrating to run telemetry.
+        modern_confirmed = 0
+        legacy_portals = Counter()
+        modern_keys = set()
         if capabilities["application_runs"] and {"confirmed", "started_at"} <= cols["application_runs"]:
             where, args = bounded("started_at")
             rows = db.execute(f"SELECT started_at FROM application_runs WHERE confirmed=1 AND {where}", args)
             confirmed_times = [_utc(row[0]) for row in rows]
-        elif capabilities["applications"] and "applied_at" in cols["applications"]:
+            run_count = db.execute(f"SELECT count(*) FROM application_runs WHERE {where}", args).fetchone()[0]
+            modern_confirmed = len(confirmed_times)
+            if capabilities["jobs"] and {"portal", "url"} <= cols["jobs"] and "job_id" in cols["application_runs"]:
+                from job_identity import canonical_url
+                modern_keys = {(r[0], canonical_url(r[1])) for r in db.execute("SELECT j.portal,j.url FROM application_runs r JOIN jobs j ON j.id=r.job_id WHERE r.confirmed=1")}
+        if capabilities["applications"] and "applied_at" in cols["applications"]:
             where, args = bounded("applied_at")
             status = " AND status IN ('submitted','applied','success')" if "status" in cols["applications"] else ""
-            rows = db.execute(f"SELECT applied_at FROM applications WHERE {where}{status}", args)
-            confirmed_times = [_utc(row[0]) for row in rows]
+            identity_available = {"portal", "url"} <= cols["applications"]
+            selected = "applied_at,portal,url" if identity_available else "applied_at"
+            rows = db.execute(f"SELECT {selected} FROM applications WHERE {where}{status}", args)
+            from job_identity import canonical_url
+            for row in rows:
+                if identity_available and (row[1], canonical_url(row[2])) in modern_keys:
+                    continue
+                confirmed_times.append(_utc(row[0]))
+                if identity_available:
+                    legacy_portals[str(row[1] or "unknown")] += 1
 
         attempts = 0
         outcomes: Counter[str] = Counter()
@@ -153,6 +170,9 @@ def aggregate_analytics(
                 )
             )
 
+        if capabilities["application_runs"]:
+            portals.update(legacy_portals)
+
         queue = {"pending": 0, "claimed": 0, "total": 0, "worker_reported": 0}
         expired = recoveries = 0
         if capabilities["jobs"] and "status" in cols["jobs"]:
@@ -173,16 +193,20 @@ def aggregate_analytics(
 
         points = Counter(_bucket_start(t, bucket).isoformat() for t in confirmed_times)
         timeline = [{"start": key, "count": points[key]} for key in sorted(points)]
+        # success_rate: prefer application_runs denominator (same source as
+        # confirmed_times); fall back to job_attempts for legacy DBs.
+        rate_base = run_count if run_count else attempts
         return {
             "range": {"name": range_name, "start": start.isoformat() if start else None, "end": end.isoformat(), "bucket": bucket},
             "capabilities": capabilities,
             "confirmed_applications": len(confirmed_times),
             "timeline": timeline,
             "attempts": attempts,
+            "run_count": run_count,
             "outcomes": dict(sorted(outcomes.items())),
             "portals": dict(sorted(portals.items())),
             "queue_depth": queue,
-            "success_rate": len(confirmed_times) / attempts if attempts else 0.0,
+            "success_rate": modern_confirmed / run_count if run_count else (len(confirmed_times) / attempts if attempts else 0.0),
             "durations_ms": _duration_summary(durations),
             "leases": {"expired": int(expired), "recoveries": int(recoveries)},
             "workers": {"total": sum(workers.values()), "by_state": dict(sorted(workers.items()))},

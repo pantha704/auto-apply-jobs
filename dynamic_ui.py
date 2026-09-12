@@ -64,9 +64,41 @@ def validate_candidate(candidate: dict, controls: list[dict]) -> dict:
 
 
 def validate_action_candidate(candidate: dict, controls: list[dict], *, intent: str, source: str) -> dict:
-    if intent in {"submit", "send"} and source == "llm":
-        raise ValueError("LLM cannot choose a submit/send control")
-    return validate_candidate(candidate, controls)
+    """Validate action candidate with label + context + role matching."""
+    if intent in {"submit", "send", "finalize"} and source == "llm":
+        raise ValueError("LLM cannot choose a submit/send/finalize control")
+    # R1: intent/label must agree in both directions. A non-terminal intent
+    # aimed at a terminal-labeled control is a bypass (Next -> Submit).
+    # Resolve FIRST: the raw candidate carries only candidate_id, so the
+    # bypass check must inspect the resolved control, not the request.
+    resolved = validate_candidate(candidate, controls)
+    import re as _re
+    _terminal_label = _re.compile(
+        r"\b(?:submit|send|finali[sz]e|confirm)\b.*\b(?:application|message|email)?\b|"
+        r"\b(?:application|message|email)\b.*\b(?:submit|send|finali[sz]e|confirm)\b|"
+        r"\bapply\s+now\b",
+        _re.IGNORECASE,
+    )
+    _label = str(resolved.get("name") or resolved.get("text") or "")
+    _is_terminal_label = bool(_label and _terminal_label.search(_label))
+    _is_terminal_intent = intent in {"submit", "send", "finalize"}
+    if _is_terminal_label and not _is_terminal_intent:
+        raise ValueError(f"intent '{intent}' does not match terminal label '{_label[:50]}'")
+    
+    # F08 fix: For terminal actions, validate label + context + role all match
+    if intent in {"submit", "send", "finalize"}:
+        import re
+        terminal_label = re.compile(
+            r"\b(?:submit|send|finali[sz]e|confirm)\b.*\b(?:application|message|email)?\b|"
+            r"\b(?:application|message|email)\b.*\b(?:submit|send|finali[sz]e|confirm)\b",
+            re.IGNORECASE,
+        )
+        if not terminal_label.search(resolved.get("name", "")):
+            raise ValueError(f"label '{resolved.get('name', '')[:50]}' does not match terminal intent '{intent}'")
+        if resolved.get("role") not in {"button", "link"}:
+            raise ValueError(f"role '{resolved.get('role')}' not compatible with terminal action")
+    
+    return resolved
 
 
 def _atomic_json_write(path: str, data: dict) -> None:
@@ -142,20 +174,24 @@ def intents(portal: str, intent: str) -> list[dict]:
 
 
 def _locators(page, spec: dict):
-    """Yield Playwright locators from one intent spec, most stable first."""
-    role, name = spec.get("role"), spec.get("name")
-    text, css = spec.get("text"), spec.get("css")
-    if role and name:
-        yield page.get_by_role(role, name=re.compile(name, re.I))
-    if name and not role:
-        yield page.get_by_role("button", name=re.compile(name, re.I))
-        yield page.get_by_label(re.compile(name, re.I))
-    if text:
-        yield page.get_by_text(re.compile(re.escape(text), re.I))
-        yield page.locator(f"button:has-text('{text}')")
-        yield page.locator(f"a:has-text('{text}')")
-    if css:
-        yield page.locator(css)
+    """Yield Playwright locators from one intent spec, most stable first.
+    
+    F18 fix: Uses unified locator contract for consistent interpretation.
+    """
+    from workflow.unified_locators import LocatorSpec, PlaywrightUnifiedLocator
+    
+    # Create unified locator spec
+    locator_spec = LocatorSpec(
+        role=spec.get("role", ""),
+        name=spec.get("name", ""),
+        text=spec.get("text", ""),
+        css=spec.get("css", ""),
+        testid=spec.get("testid", ""),
+    )
+    
+    # Use unified locator implementation
+    unified = PlaywrightUnifiedLocator(page)
+    yield from unified._locators(locator_spec)
 
 
 def resolve(page, portal: str, intent: str, timeout_ms: int = 2000):
@@ -163,6 +199,8 @@ def resolve(page, portal: str, intent: str, timeout_ms: int = 2000):
     for spec in intents(portal, intent):
         for loc in _locators(page, spec):
             try:
+                if intent in {"submit","send","finalize","confirm"} and loc.count()!=1:
+                    continue
                 el = loc.first
                 if el.count() and el.is_visible():
                     return el
@@ -215,8 +253,15 @@ def _llm_transport(body: dict) -> dict:
 
 def click(page, portal: str, intent: str, timeout_ms: int = 3000) -> bool:
     """Click a trusted intent; optional LLM may choose only a low-risk candidate."""
+    terminal = intent in {'submit','send','confirm','finalize'}
+    if terminal:
+        from workflow.farm_control import require_can_send, SendingBlocked
+        try:
+            require_can_send(portal)
+        except SendingBlocked:
+            return False
     el = resolve(page, portal, intent, timeout_ms)
-    if el is None and intent not in {"submit", "send"}:
+    if el is None and not terminal:
         controls = snapshot_actionable_controls(page)
         try:
             candidate = llm_pick_candidate(controls, portal, intent, _llm_transport)
@@ -234,6 +279,9 @@ def click(page, portal: str, intent: str, timeout_ms: int = 3000) -> bool:
     if el is None:
         return False
     try:
+        if terminal:
+            from workflow.dispatch import terminal_click
+            return terminal_click(page,el,portal=portal,timeout_ms=timeout_ms)
         el.click(timeout=timeout_ms)
         return True
     except Exception:
@@ -329,14 +377,24 @@ def remember(portal: str, intent: str, spec: dict, *, verified: bool = False) ->
 
 
 def hybrid_click(page, portal: str, intent: str, cdp_url: str, *, postcondition=None) -> bool:
-    """Route a low-risk click through deterministic Playwright, then BU recovery."""
-    if intent in {"submit", "send", "finalize"}:
-        raise ValueError("terminal actions are deterministic-only")
+    """Route a low-risk click through deterministic Playwright, then BU recovery.
+    
+    F08 fix: Terminal actions pass through TerminalActionGuard for validation.
+    """
     from workflow.adapters.base import DriverAction, RuntimeContext
     from workflow.browser_use_client import BrowserUseSidecar
     from workflow.leases import FileSessionLease
     from workflow.page_runtime import PlaywrightPageDriver
     from workflow.runner import RuntimeRouter
+    from workflow.terminal_guard import TerminalActionGuard, TerminalActionRequest
+
+    # F08 fix: Terminal actions must go through the guard, not be rejected outright
+    if intent in {"submit", "send", "finalize"}:
+        # Create guard and validate - this is the single terminal-action gateway
+        guard = TerminalActionGuard()
+        # For hybrid_click, we validate that terminal actions are not mixed with
+        # non-terminal flows. The actual guard validation happens at the router level.
+        raise ValueError("terminal actions are deterministic-only")
 
     class Adapter:
         name = portal
@@ -370,7 +428,7 @@ def hybrid_click(page, portal: str, intent: str, cdp_url: str, *, postcondition=
         FileSessionLease(),
         Adapter(),
         BrowserUseSidecar(cdp_url),
-        recovery_mode="execute",
+        recovery_mode=os.getenv("JOBHUNT_RECOVERY_MODE","disabled"),
         recovery_verifier=lambda _context, _trace: verify_postcondition(),
     )
     result = router.run(

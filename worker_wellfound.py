@@ -17,8 +17,11 @@ from workflow.application_gate import (
     PublicationUnavailable,
     eligible_for_claim,
     pin_claim,
+    guarded_mark,
+    fence_token_for,
     published_runtime,
 )
+from workflow.answers import AnswerRepository
 import jd_match
 from workflow.browser_use_client import BrowserUseSidecar
 from submission_signals import has_submission_confirmation
@@ -28,7 +31,7 @@ from worker_guard import BrowserWatchdog, exit_if_fired
 GUARD = None  # active per-job BrowserWatchdog (set inside apply_one)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
+from workflow.browser_config import BROWSER_EXECUTABLE as CLOAK
 RESUME = ""
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "wf-w1"
 QUEUE_DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
@@ -44,6 +47,7 @@ CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 APPLY_DIALOG = "[role=dialog][aria-modal=true]:not([id*=truste]):not([id*=consent]), .ReactModal__Content"
 
 ANSWERS = {}
+ANSWERS_REPO = None
 SNAPS = {}
 
 PROFILE = {}
@@ -73,6 +77,15 @@ def configure_publication(runtime):
         "requires_sponsorship": runtime.boolean_fact("work_authorization.requires_sponsorship", "profile.requires_sponsorship"),
     }
     RESUME = runtime.resume_path
+    global ANSWERS_REPO
+    try:
+        _ctrl_db = os.getenv('JOBHUNT_CONTROL_DB', os.path.join(HERE, 'controlplane.db'))
+        _key_path = os.getenv('JOBHUNT_VAULT_KEY', os.path.join(HERE, '.controlplane.key'))
+        from cryptography.fernet import Fernet as _F
+        _k = _F(open(_key_path, 'rb').read().strip())
+        ANSWERS_REPO = AnswerRepository(_ctrl_db, _k)
+    except Exception:
+        ANSWERS_REPO = None
 
 
 def safe_diagnostic_text(text):
@@ -93,7 +106,7 @@ def telemetry():
 def claim(runtime):
     while True:
         c = db()
-        row = c.execute("SELECT id, url, title FROM jobs WHERE portal='wellfound' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
+        row = c.execute("SELECT id, url, title, location, company FROM jobs WHERE portal='wellfound' AND status='pending' AND (eligibility IS NULL OR eligibility=1) ORDER BY prio DESC, rowid LIMIT 1").fetchone()
         if not row:
             c.close(); telemetry().idle(); return None
         reason = title_rejection_reason(row[2] or "", "wellfound")
@@ -102,22 +115,24 @@ def claim(runtime):
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", reason)
             continue
-        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "wellfound"}):
-            c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
-            c.commit(); c.close()
-            telemetry().outcome(row[0], "skip", "policy-ineligible")
-            continue
         upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
         c.commit(); c.close()
         if upd_count == 1:
             telemetry().claimed(row[0])
-            return {"id": row[0], "url": row[1], "title": row[2]}
+            return {"id": row[0], "url": row[1], "title": row[2], "location": row[3] or "", "company": row[4] or ""}
 
 def mark(jid, status, result=""):
     c = db()
-    c.execute("UPDATE jobs SET status=?, result=? WHERE id=?", (status, result[:200], jid))
+    from workflow.application_gate import guarded_mark, claim_fence
+    # B3: resolve our fence and present it — ownerless writes are refused.
+    rows = guarded_mark(c, jid, WORKER_ID, status, result,
+                        fence_token=claim_fence(jid))
+    actual = c.execute("SELECT status,result FROM jobs WHERE id=?", (jid,)).fetchone() if rows else None
     c.commit(); c.close()
-    telemetry().outcome(jid, status, result)
+    if not rows:
+        print(f"[{WORKER_ID}] mark lost ownership for {jid} — leaving to current owner", flush=True)
+    if rows and actual:
+        telemetry().outcome(jid, actual[0], actual[1] or "")
 
 def fill(page, label, value):
     try:
@@ -138,7 +153,13 @@ def fill_dlg(page, label, value):
 
 def expand_category(url, ctx, page):
     """Category page (/role/r/...): scrape individual /jobs/ links and enqueue them.
-    Returns (count_added, first_job_url) or (0, None)."""
+    
+    F12 fix: Expansion produces normalized child jobs only, not parent context.
+    Each child job gets its own normalized title extracted from the URL, not the
+    parent category title.
+    
+    Returns (count_added, first_job_url) or (0, None).
+    """
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=40000)
         page.wait_for_timeout(5000)
@@ -162,7 +183,12 @@ def expand_category(url, ctx, page):
                 cur = c.execute("SELECT id FROM jobs WHERE id=? OR url=?", (jid, l)).fetchone()
                 if cur:
                     continue
-                ttl = l.split("/jobs/")[-1].split("-", 1)[-1].replace("-", " ")[:80]
+                # F12 fix: Normalize child job title from URL, not parent context
+                # Extract job title from URL slug, not from page/parent context
+                url_slug = l.split("/jobs/")[-1].split("-", 1)[-1] if "/jobs/" in l else ""
+                ttl = url_slug.replace("-", " ")[:80].strip()
+                if not ttl:
+                    ttl = "Wellfound Job"
                 if not is_tech_title(ttl, "wellfound"):
                     continue
                 c.execute("INSERT OR IGNORE INTO jobs (id, portal, url, title, source, status, prio, fetched_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -284,10 +310,7 @@ def _apply_one(url, expected_session_revision=None):
             # CATEGORY PAGE (/role/r/...) — expand to individual jobs, not an apply target
             if "/role/r/" in page.url or "/role/r/" in url:
                 added, first = expand_category(url, ctx, page)
-                if first:
-                    page.goto(first, wait_until="commit", timeout=45000)
-                else:
-                    return (False, "category-no-jobs")
+                return (False,f"expanded:{added}" if added else "category-no-jobs")
             # dismiss cookie consent banner (TrustArc) — wait for render, then click
             dismiss_consent(page)
             # double-apply guard: if this URL was already SUBMITTED in the audit
@@ -434,15 +457,13 @@ def _apply_one(url, expected_session_revision=None):
                     pw.nth(0).fill(PASSWORD)
                     pw.nth(1).fill(PASSWORD)
             ph("e.g. San Francisco", PROFILE["location"])
-            # open to work remotely checkbox
-            try:
-                cb = page.locator(APPLY_DIALOG + " input[type=checkbox]").first
-                if not cb.is_checked(): cb.click()
-            except Exception: pass
             # years of experience select
             try:
                 sel = page.locator(APPLY_DIALOG + " select").first
-                sel.select_option(label="1 year")
+                _exp_val = None
+                if ANSWERS_REPO:
+                    _exp_val = ANSWERS_REPO.lookup("preference.experience_years", {})
+                sel.select_option(label=str(_exp_val or PROFILE["years"] + (" year" if str(PROFILE["years"])=="1" else " years")))
             except Exception:
                 pass
             # years of experience — custom downshift combobox fallback (no native select)
@@ -453,10 +474,8 @@ def _apply_one(url, expected_session_revision=None):
                     if combo.count() and ("select" in combo_txt or not combo_txt.strip()):
                         combo.click(timeout=4000)
                         page.wait_for_timeout(1200)
-                        # prefer an exact "1 year" option; else the first numeric option
-                        opt = page.locator("[role=option]:has-text('1 year'), [role=option]:has-text('1 Year')").first
-                        if opt.count() == 0:
-                            opt = page.locator("[role=option]").first
+                        # R6: only exact approved-years option. No first-option fallback.
+                        opt = page.get_by_role("option",name=re.compile(r"^"+re.escape(str(PROFILE["years"]))+r" years?$",re.I)).first
                         if opt.count() and opt.is_visible():
                             opt.click(timeout=4000)
             except Exception:
@@ -464,7 +483,12 @@ def _apply_one(url, expected_session_revision=None):
             # desired salary
             try:
                 num = page.locator(APPLY_DIALOG + " input[type=number]").first
-                num.fill(PROFILE["salary"])
+                _sal = PROFILE["salary"]
+                if ANSWERS_REPO:
+                    _repo_sal = ANSWERS_REPO.lookup("preference.salary", {})
+                    if _repo_sal:
+                        _sal = str(_repo_sal)
+                num.fill(_sal)
             except Exception:
                 pass
             # work authorization radios: answer honestly per question text, never guess
@@ -496,40 +520,14 @@ def _apply_one(url, expected_session_revision=None):
                     # a separately approved boolean fact is published for them.
             except Exception:
                 pass
-            # cover letter textarea — JD-tailored note, fallback to static profile note.
-            # Fill ALL visible empty textareas (some dialogs add custom questions
-            # like "What interests you about this company?" as extra textareas —
-            # leaving them empty blocks submission).
-            try:
-                note_txt = (PROFILE.get("note") or "").strip()
-                if note_txt:
-                    for ta in page.locator(APPLY_DIALOG + " textarea:visible").all():
-                        try:
-                            if not ta.input_value().strip():
-                                ta.fill(note_txt)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            # custom-question text inputs (customQuestionAnswers[N][answer]) — fill if empty
-            try:
-                for ci in page.locator(APPLY_DIALOG + " input:visible").all():
-                    try:
-                        nm = ci.evaluate("el => (el.getAttribute('name')||'') + '|' + (el.getAttribute('placeholder')||'')")
-                        if ("customQuestion" in nm or "answer" in nm.lower()) and not ci.input_value().strip():
-                            ci.fill((PROFILE.get("note") or "").strip()[:250])
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            ANSWERS["note"] = note_txt
-            # resume upload via file input
-            try:
-                page.locator(APPLY_DIALOG + " input[type=file]").first.set_input_files(RESUME)
-                ANSWERS["resume"] = os.path.basename(RESUME)
-                page.wait_for_timeout(2000)
-            except Exception:
-                pass
+            from workflow.form_answers import fill_approved_questions,upload_approved_resume
+            note_txt=(PROFILE.get('note') or '').strip()
+            if not fill_approved_questions(page.locator(APPLY_DIALOG),ANSWERS_REPO,portal='wellfound',cover_note=note_txt):
+                return (False,'needs-review:unknown-question')
+            ANSWERS['note']=note_txt
+            if not upload_approved_resume(page.locator(APPLY_DIALOG),RESUME):
+                return (False,'needs-review:approved-resume-upload')
+            ANSWERS['resume']=os.path.basename(RESUME)
             # audit snapshot BEFORE submit
             try:
                 SNAPS["before"] = audit.snapshot(page, "wellfound", url, "before")
@@ -693,6 +691,14 @@ def main():
             print(f"[{WORKER_ID}] queue empty, sleep", flush=True)
             time.sleep(60); continue
         print(f"[{WORKER_ID}] claim: {job['title'][:50]}", flush=True)
+        # B6: the bundle frozen at claim must still match the live approved release.
+        from workflow.application_gate import claim_bundle
+        _bundle = claim_bundle(job["id"])
+        if _bundle is not None and not _bundle.matches_runtime(runtime):
+            mark(job["id"], "pending", "release|approved-release-changed")
+            print(f"[{WORKER_ID}] release changed since claim — job returned for re-planning", flush=True)
+            time.sleep(2)
+            continue
         signal.alarm(180)  # no job may hang the worker longer than 3 minutes
         try:
             ok, reason = apply_one(
@@ -709,17 +715,26 @@ def main():
             mark(job["id"], "pending", "browser-wedge-timeout")
             print(f"[{WORKER_ID}] BROWSER WEDGE — job requeued, exiting for systemd restart", flush=True)
             os._exit(7)
-        mark(job["id"], "done" if ok else "skip", reason)
-        try:
-            audit.record_application(
-                portal="wellfound", company="(wellfound)", role=job["title"], url=job["url"],
-                status="submitted" if ok else f"skipped:{reason[:60]}",
-                answers=ANSWERS, resume_used=os.path.basename(RESUME),
-                note=reason[:200],
-                snap_before=(SNAPS.get("before") or {}).get("png"),
-                snap_after=(SNAPS.get("after") or {}).get("png"))
-        except Exception as e:
-            print(f"[{WORKER_ID}] audit record failed: {str(e)[:80]}", flush=True)
+        from audit import SubmissionFinalizer
+        from workflow.application_gate import claim_fence
+        _fin = SubmissionFinalizer(QUEUE_DB)
+        _fin.finalize(
+            job_id=job["id"],
+            worker_id=WORKER_ID,
+            fence_token=claim_fence(job["id"]) or None,
+            status="done" if ok else "skip",
+            result=reason,
+            portal="wellfound",
+            company="(wellfound)",
+            role=job["title"],
+            url=job["url"],
+            audit_status="submitted" if ok else f"skipped:{reason[:60]}",
+            answers=ANSWERS,
+            resume_used=os.path.basename(RESUME),
+            note=reason[:200],
+            snap_before=(SNAPS.get("before") or {}).get("png"),
+            snap_after=(SNAPS.get("after") or {}).get("png"),
+        )
         print(f"[{WORKER_ID}] {'DONE' if ok else 'SKIP'}: {reason[:80]}", flush=True)
         time.sleep(3)
 

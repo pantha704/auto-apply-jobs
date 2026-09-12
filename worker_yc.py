@@ -27,6 +27,7 @@ from workflow.application_gate import (
     PublicationUnavailable,
     eligible_for_claim,
     pin_claim,
+    fence_token_for,
     published_runtime,
 )
 import jd_match
@@ -35,7 +36,7 @@ from submission_signals import has_submission_confirmation
 from title_filter import title_rejection_reason
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
+from workflow.browser_config import BROWSER_EXECUTABLE as CLOAK
 RESUME = ""
 PUBLISHED_NOTE = ""
 PUBLISHED_STACK = ""
@@ -78,31 +79,34 @@ def telemetry():
     return telemetry_for(WORKER_ID, "yc", QUEUE_DB, STATE_ROOT)
 
 def claim(runtime):
-    c = db()
-    row = c.execute("SELECT id, url, title FROM jobs WHERE portal='yc' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
-    if not row:
+    while True:
+        c = db()
+        row = c.execute("SELECT id, url, title, location, company FROM jobs WHERE portal='yc' AND status='pending' AND (eligibility IS NULL OR eligibility=1) ORDER BY prio DESC, rowid LIMIT 1").fetchone()
+        if not row:
+            c.close()
+            telemetry().idle()
+            return None
+        upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
+        c.commit()
         c.close()
-        telemetry().idle()
-        return None
-    if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "yc"}):
-        c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
-        c.commit(); c.close()
-        telemetry().outcome(row[0], "skip", "policy-ineligible")
-        return claim(runtime)
-    upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
-    c.commit()
-    c.close()
-    if upd_count != 1:
-        return claim(runtime)
-    telemetry().claimed(row[0])
-    return {"id": row[0], "url": row[1], "title": row[2]}
+        if upd_count != 1:
+            continue
+        telemetry().claimed(row[0])
+        return {"id": row[0], "url": row[1], "title": row[2], "location": row[3] or "", "company": row[4] or ""}
 
 def mark(jid, status, result=""):
     c = db()
-    c.execute("UPDATE jobs SET status=?, result=? WHERE id=?", (status, result[:250], jid))
+    from workflow.application_gate import guarded_mark, claim_fence
+    # B3: resolve our fence and present it — ownerless writes are refused.
+    rows = guarded_mark(c, jid, WORKER_ID, status, result,
+                        fence_token=claim_fence(jid))
+    actual = c.execute("SELECT status,result FROM jobs WHERE id=?", (jid,)).fetchone() if rows else None
     c.commit()
     c.close()
-    telemetry().outcome(jid, status, result)
+    if not rows:
+        print(f"mark lost ownership for {jid} — leaving to current owner", flush=True)
+    if rows and actual:
+        telemetry().outcome(jid, actual[0], actual[1] or "")
 
 def expand_company(page, job):
     """Company page -> enqueue its /jobs/ links, mark company done."""
@@ -311,10 +315,24 @@ def handle(job, expected_session_revision=None):
                     m = re.search(r"at\s+([A-Za-z0-9&.\- ]+?)(?:\(W\d+\))?\s*$", (page.inner_text("h1") or "")[:150])
                     if m:
                         comp = m.group(1).strip()
-                    audit.record_application("yc", comp or job["title"], job["title"], url,
-                                             "submitted", answers={"note": note[:400]}, resume_used=RESUME,
-                                             note=result)
-                    mark(job["id"], "done", "submitted")
+                    from audit import SubmissionFinalizer
+                    from workflow.application_gate import claim_fence
+                    _fin = SubmissionFinalizer(QUEUE_DB)
+                    _fin.finalize(
+                        job_id=job["id"],
+                        worker_id=WORKER_ID,
+                        fence_token=claim_fence(job["id"]) or None,
+                        status="done",
+                        result="submitted",
+                        portal="yc",
+                        company=comp or job["title"],
+                        role=job["title"],
+                        url=url,
+                        audit_status="submitted",
+                        answers={"note": note[:400]},
+                        resume_used=RESUME,
+                        note=result,
+                    )
                 else:
                     mark(job["id"], "skip", result)
     except Exception as e:
@@ -352,6 +370,14 @@ def main():
             continue
         idle = 0
         log(f"claim: {job['title'][:70]} | {job['url'][:80]}")
+        # B6: the bundle frozen at claim must still match the live approved release.
+        from workflow.application_gate import claim_bundle
+        _bundle = claim_bundle(job["id"])
+        if _bundle is not None and not _bundle.matches_runtime(runtime):
+            mark(job["id"], "pending", "release|approved-release-changed")
+            log("release changed since claim — job returned for re-planning")
+            time.sleep(2)
+            continue
         GUARD = BrowserWatchdog("yc_cap", max_sec=240, job=(job["id"], job["url"]))
         GUARD.start()
         try:

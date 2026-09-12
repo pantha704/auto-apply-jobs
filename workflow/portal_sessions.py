@@ -114,7 +114,7 @@ def classify_probe(
     )
     if any(marker in haystack for marker in expiry_markers):
         return "expired"
-    if url.startswith(("http://", "https://")):
+    if url.startswith(("http://", "https://")) and any(marker in body.lower() for marker in ("log out","logout","sign out","account settings","my applications")):
         return "valid"
     return "unknown"
 
@@ -261,8 +261,8 @@ class PortalSessionManager:
             db.execute("BEGIN IMMEDIATE")
             self._require_lease(db, portal, token)
             db.execute(
-                "DELETE FROM browser_session_leases WHERE session_ref=?",
-                (f"portal:{portal}",),
+                "UPDATE browser_session_leases SET owner_id='',lease_token='',expires_at=? WHERE session_ref=?",
+                (_iso(self.clock()), f"portal:{portal}"),
             )
             current = db.execute(
                 "SELECT current_version_id FROM portal_sessions WHERE portal=?", (portal,)
@@ -280,7 +280,7 @@ class PortalSessionManager:
         portal_dir = self.storage_dir / portal
         portal_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(portal_dir, 0o700)
-        destination = portal_dir / f"session-r{revision}.enc"
+        destination = portal_dir / f"session-r{revision}-{uuid.uuid4().hex}.enc"
         fd, temporary = tempfile.mkstemp(prefix=".candidate-", dir=portal_dir)
         try:
             os.fchmod(fd, 0o600)
@@ -486,6 +486,7 @@ class PortalSessionManager:
         portal: str,
         state: str,
         safe_detail: str | None = None,
+        *, version_id: str | None = None,
     ) -> None:
         """Record a read-only probe of the currently published session."""
         portal = _portal(portal)
@@ -496,6 +497,11 @@ class PortalSessionManager:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure_portal(db, portal)
+            current=db.execute('SELECT current_version_id,state FROM portal_sessions WHERE portal=?',(portal,)).fetchone()
+            if current['current_version_id']!=version_id or current['state'] in {'renewing','probing'}:
+                return
+            if state=='valid' and version_id is None:
+                return
             db.execute(
                 """UPDATE portal_sessions SET state=?,last_probe_at=?,
                    last_success_at=CASE WHEN ?='valid' THEN ? ELSE last_success_at END,
@@ -503,7 +509,7 @@ class PortalSessionManager:
                    safe_detail=?,updated_at=? WHERE portal=?""",
                 (state, now, state, now, state, state, detail, now, portal),
             )
-            self._event(db, portal, None, "health_probe", state, detail)
+            self._event(db, portal, version_id, "health_probe", state, detail)
 
     def public_status(self, portal: str) -> dict[str, Any]:
         portal = _portal(portal)
@@ -535,7 +541,7 @@ class PortalSessionManager:
                 "updated_at": None,
             }
         result = dict(row)
-        result["renewing"] = bool(result.pop("renewal_owner"))
+        result["renewing"] = bool(result.pop("renewal_owner")) and bool(result["lease_expires_at"] and _parse(result["lease_expires_at"])>self.clock())
         return result
 
     def list_public_statuses(self) -> list[dict[str, Any]]:

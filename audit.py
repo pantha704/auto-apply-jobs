@@ -161,6 +161,12 @@ def record_submission_proof(
         os.chmod(after_png, 0o600)
     confirmed = bool(text_ok and png_ok)
     status = status_if_confirmed if confirmed else "submit-unconfirmed"
+    from workflow.application_gate import active_claim
+    entry=active_claim()
+    if entry and entry.get('database') and str(entry['job_id'])==str(job_id):
+        from workflow.dispatch import observe_confirmation
+        observe_confirmation(page,entry)
+        return SubmissionProof(confirmed,status,(before or {}).get('png'),after_png if png_ok else None,False,None)
     inserted, rid = record_application(
         portal,
         company,
@@ -182,25 +188,189 @@ def record_submission_proof(
         application_id=rid,
     )
 
-# Honest answer bank (never invent beyond this). Identity from profile_local / env.
-import profile as ident
-PROFILE = {
-    "name": ident.NAME,
-    "email": ident.EMAIL,
-    "phone": ident.PHONE,
-    "address": ident.ADDRESS,
-    "city": ident.CITY, "state": ident.STATE, "pin": ident.PIN,
-    "linkedin": "https://www.linkedin.com/in/pantha704",
-    "portfolio": "https://pantha704.github.io",
-    "college": ident.COLLEGE,
-    "expected_lpa": "700000", "current_lpa": "480000", "notice": "0",
-    "years": "1",
-    "work_auth_us": "No",
-    "sponsorship": "Yes",  # requires visa sponsorship — honest Yes on sponsor questions
-    "relocate": "No",
-    "education_completed": "No",
-    "excel_years": "1",
-    "note": "Full-stack engineer (TypeScript/Python/Rust) with 1 year of experience, based in Kolkata, open to remote roles.",
-    "stack": "TypeScript, JavaScript, Python, Rust, Node.js, Next.js, React, Tailwind CSS, PostgreSQL, Prisma, Redis, Docker, Solana/Anchor, REST APIs, WebSockets",
-    "resume": os.environ.get("JOBHUNT_RESUME", os.path.join(HERE, "resume.pdf")),
-}
+class SubmissionFinalizer:
+    """Atomically update jobs status AND write audit record in one transaction.
+
+    This replaces the two-step pattern of mark() + audit.record_application()
+    which could disagree if one succeeded and the other failed.
+
+    Usage:
+        finalizer = SubmissionFinalizer(QUEUE_DB)
+        finalizer.finalize(
+            job_id=job["id"],
+            status="done", result="submitted",
+            portal="linkedin", company="Acme", role="Engineer",
+            url="https://...", audit_status="submitted",
+            answers=answers, resume_used="resume.pdf",
+            note="applied", snap_before=..., snap_after=...,
+        )
+    """
+
+    def __init__(self, db_path: str | None = None):
+        self._db_path = db_path or DB
+
+    def finalize(
+        self,
+        *,
+        job_id: str | int,
+        status: str,
+        result: str = "",
+        portal: str,
+        company: str = "",
+        role: str = "",
+        url: str = "",
+        audit_status: str,
+        answers=None,
+        resume_used=None,
+        note: str = "",
+        snap_before=None,
+        snap_after=None,
+        worker_id: str | None = None,
+        fence_token: str | None = None,
+    ) -> None:
+        """Atomically update queue status and write audit record."""
+        c = sqlite3.connect(self._db_path, timeout=10)
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            # R9: ensure audit table exists on migrated queues.
+            c.execute("""CREATE TABLE IF NOT EXISTS applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                portal TEXT NOT NULL, company TEXT, role TEXT, url TEXT NOT NULL,
+                applied_at TEXT NOT NULL, answers TEXT, resume_used TEXT,
+                status TEXT, note TEXT, snap_before TEXT, snap_after TEXT,
+                url_hash TEXT, UNIQUE(portal, url_hash))""")
+            # R9: tolerate legacy test DBs missing fence columns.
+            cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)")}
+            if "claimed_by" not in cols:
+                c.execute("ALTER TABLE jobs ADD COLUMN claimed_by TEXT")
+            if "last_fence_token" not in cols:
+                c.execute("ALTER TABLE jobs ADD COLUMN last_fence_token TEXT")
+            # R9: validate owned job exists. Reject orphans.
+            # B3: worker_id is mandatory — ownerless finalization is refused.
+            # When the stored row carries a fence token, the caller must present
+            # the matching token; ownership alone is not enough.
+            job = c.execute(
+                "SELECT id, portal, status, claimed_by, last_fence_token FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if not job:
+                raise ValueError(f"finalize refused: unknown job {job_id}")
+            if not worker_id:
+                raise ValueError(f"finalize refused: worker_id required for job {job_id}")
+            if job[3] != worker_id:
+                raise ValueError(f"finalize refused: job {job_id} owned by {job[3]} not {worker_id}")
+            if job[4] and fence_token != job[4]:
+                raise ValueError(f"finalize refused: stale fence for job {job_id}")
+            tables = {row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if 'submission_intents' in tables:
+                stored_url = c.execute('SELECT url FROM jobs WHERE id=?',(job_id,)).fetchone()[0]
+                if portal!=job[1] or not url or canonical(url)!=canonical(stored_url):
+                    raise ValueError('finalize refused: application identity mismatch')
+                if job[2]!='claimed':
+                    raise ValueError('finalize refused: job is not claimed')
+                intent = c.execute('SELECT state,evidence_json FROM submission_intents WHERE job_id=? AND fence_token=?',(job_id,fence_token)).fetchone()
+                if audit_status in {'submitted','applied'}:
+                    if not intent or intent[0] not in {'verified','confirmed'}:
+                        status,result,audit_status='skip','unknown-outcome','submit-unconfirmed'
+                    else:
+                        from pathlib import Path
+                        proof=json.loads(intent[1]); snap_after=proof['artifact']
+                        if not _png_ok(snap_after) or hashlib.sha256(Path(snap_after).read_bytes()).hexdigest()!=proof['sha256']:
+                            raise ValueError('receipt artifact integrity failed')
+                        c.execute("UPDATE submission_intents SET state='confirmed' WHERE job_id=?",(job_id,))
+                elif intent:
+                    status,result,audit_status='skip','unknown-outcome','submit-unconfirmed'
+            # R9: normalize legacy outcomes (reviewed|submit-unconfirmed etc).
+            norm_result = (result or "").strip()
+            if status == "done" and any(marker in f"{norm_result} {audit_status}" for marker in ("unconfirmed", "unknown-outcome")):
+                raise ValueError("finalize refused: uncertain outcome cannot become done")
+            # 1. Update jobs table — ownership already verified above.
+            cur = c.execute(
+                "UPDATE jobs SET status=?, result=? WHERE id=? AND claimed_by=?",
+                (status, norm_result[:200], job_id, worker_id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError(f"finalize refused: lost ownership for job {job_id}")
+            if "last_outcome_code" in cols:
+                c.execute("UPDATE jobs SET last_outcome_code=? WHERE id=?",(audit_status,job_id))
+            # 2. Write audit record to applications table
+            uh = hashlib.sha1(canonical(url).encode()).hexdigest() if url else ""
+            exists = c.execute(
+                "SELECT id, status FROM applications WHERE portal=? AND url_hash=?",
+                (portal, uh),
+            ).fetchone() if uh else None
+            now = datetime.now(timezone.utc).isoformat()
+            if exists:
+                # R9: normalize legacy exact-string bug (reviewed|submit-unconfirmed etc).
+                prev = (exists[1] or "")
+                prev_base = prev.split("|")[-1].removeprefix("skipped:").strip()
+                if prev_base not in {"submitted", "applied"} and audit_status in {
+                    "applied",
+                    "submitted",
+                }:
+                    c.execute(
+                        """UPDATE applications SET status=?, applied_at=?,
+                           answers=?, resume_used=?, note=?,
+                           snap_before=COALESCE(?, snap_before),
+                           snap_after=? WHERE id=?""",
+                        (
+                            audit_status,
+                            now,
+                            json.dumps(answers, ensure_ascii=False)
+                            if answers
+                            else None,
+                            resume_used,
+                            note,
+                            snap_before,
+                            snap_after,
+                            exists[0],
+                        ),
+                    )
+            elif url:
+                try:
+                    c.execute(
+                        """INSERT INTO applications
+                        (portal, company, role, url, applied_at, answers,
+                         resume_used, status, note, snap_before, snap_after, url_hash)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            portal,
+                            company,
+                            role,
+                            url,
+                            now,
+                            json.dumps(answers, ensure_ascii=False)
+                            if answers
+                            else None,
+                            resume_used,
+                            audit_status,
+                            note,
+                            snap_before,
+                            snap_after,
+                            uh,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    raise  # Preserve atomicity: constraint failures must roll back the queue.
+            if 'application_runs' in tables:
+                c.execute("UPDATE application_runs SET state='finished',finished_at=?,outcome_code=?,confirmed=? WHERE job_id=? AND lease_token=? AND state='running'",(now,audit_status,int(audit_status in {'submitted','applied'}),job_id,fence_token))
+                c.execute('UPDATE job_attempts SET finished_at=?,outcome_code=? WHERE run_id IN (SELECT id FROM application_runs WHERE job_id=? AND lease_token=?) AND finished_at IS NULL',(now,audit_status,job_id,fence_token))
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            c.close()
+
+
+# F01 fix: Hardcoded PROFILE dict removed. Workers MUST use
+# workflow.application_gate.published_runtime() and workflow.answers.AnswerRepository
+# for all candidate facts. The old PROFILE dict allowed workers to bypass the
+# approved release bundle, leading to incorrect submitted answers.
+#
+# If you need candidate facts, use:
+#   from workflow.application_gate import published_runtime
+#   runtime = published_runtime(portal, required_fact_groups)
+#   runtime.fact("name")  # approved fact
+#
+# Legacy code that references audit.PROFILE will get a clear ImportError.

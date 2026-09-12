@@ -20,7 +20,7 @@ def test_watchdog_session_guidance_uses_only_approved_safe_detail():
 
 
 def test_watchdog_script_uses_canonical_runtime_and_does_not_hard_fail_session_probe():
-    text = Path("/home/ubuntu/job_hunt_linkedin/watchdog.py").read_text()
+    text = (Path(__file__).resolve().parents[1] / "watchdog.py").read_text()
     assert 'os.getenv("JOBHUNT_QUEUE_DB"' in text
     assert "publication_is_ready" in text
     assert 'alert("linkedin_session_unavail"' in text

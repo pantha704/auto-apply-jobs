@@ -23,10 +23,11 @@ def _iso(value: datetime) -> str:
 class EmailClaim:
     id: str
     contact_id: str
-    to: str
+    to: str  # F20: frozen at claim time from approved contact
     subject: str
     body: str
     worker_id: str
+    attempt_token: str = ""
 
 
 class ColdEmailQueue:
@@ -47,9 +48,11 @@ class ColdEmailQueue:
         ts = _iso(self.now())
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            # F20: Block new send while ANY prior one is unresolved
+            # (queued, sending, sent, unknown — not just queued/sending/sent).
             existing = db.execute(
                 """SELECT id FROM cold_email_sends WHERE contact_id=?
-                   AND status IN ('queued','sending','sent') ORDER BY created_at DESC LIMIT 1""",
+                   AND status NOT IN ('failed','cancelled') ORDER BY created_at DESC LIMIT 1""",
                 (contact_id,),
             ).fetchone()
             if existing:
@@ -63,10 +66,10 @@ class ColdEmailQueue:
             db.execute(
                 """INSERT INTO cold_email_sends(
                      id,contact_id,template_id,subject,status,created_at,body,
-                     approved_at,approved_by,attempt_count,updated_at
-                   ) VALUES(?,?,?,?, 'queued',?,?,?,?,0,?)""",
+                     approved_at,approved_by,attempt_count,updated_at,approved_recipient
+                   ) VALUES(?,?,?,?, 'queued',?,?,?,?,0,?,?)""",
                 (send_id, contact_id, contact["template_id"], contact["draft_subject"],
-                 ts, contact["draft_body"], ts, approved_by, ts),
+                 ts, contact["draft_body"], ts, approved_by, ts, contact["email"]),
             )
             return send_id
 
@@ -99,35 +102,41 @@ class ColdEmailQueue:
                 (ts, ts),
             )
             row = db.execute(
-                """SELECT s.id,s.contact_id,s.subject,s.body,c.email
+                """SELECT s.id,s.contact_id,s.subject,s.body,s.approved_recipient email
                    FROM cold_email_sends s JOIN cold_contacts c ON c.id=s.contact_id
                    WHERE s.status='queued'
-                     AND s.approved_at IS NOT NULL
+                     AND s.approved_at IS NOT NULL AND s.approved_recipient IS NOT NULL
                      AND (s.next_attempt_at IS NULL OR s.next_attempt_at<=?)
                    ORDER BY s.created_at LIMIT 1""",
                 (ts,),
             ).fetchone()
             if not row:
                 return None
+            token=uuid.uuid4().hex
             updated = db.execute(
                 """UPDATE cold_email_sends SET status='sending',claimed_by=?,claimed_at=?,
-                     lease_expires_at=?,attempt_count=attempt_count+1,updated_at=?
+                     lease_expires_at=?,attempt_count=attempt_count+1,updated_at=?,attempt_token=?
                    WHERE id=? AND (status='queued' OR (status='sending' AND lease_expires_at<?))""",
-                (worker_id, ts, expires, ts, row["id"], ts),
+                (worker_id, ts, expires, ts, token, row["id"], ts),
             )
             if updated.rowcount != 1:
                 return None
+            # F20: Recipient, subject, body are frozen from the approved draft at claim time.
+            # The contact row is read but the values are immutable in the EmailClaim.
             return EmailClaim(str(row["id"]), str(row["contact_id"]), str(row["email"]),
-                              str(row["subject"]), str(row["body"]), worker_id)
+                              str(row["subject"]), str(row["body"]), worker_id, token)
 
     def sent(self, claim: EmailClaim, *, provider_id: str) -> None:
         ts = _iso(self.now())
+        # F20: Validate provider_id is not None or stringified null.
+        if not provider_id or provider_id in ("None", "null", ""):
+            raise ValueError(f"provider_id must be a real value, got: {provider_id!r}")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             updated = db.execute(
                 """UPDATE cold_email_sends SET status='sent',provider_id=?,sent_at=?,updated_at=?,
-                     lease_expires_at=NULL,error=NULL WHERE id=? AND status='sending' AND claimed_by=?""",
-                (provider_id, ts, ts, claim.id, claim.worker_id),
+                     lease_expires_at=NULL,error=NULL WHERE id=? AND status='sending' AND claimed_by=? AND attempt_token=?""",
+                (provider_id, ts, ts, claim.id, claim.worker_id, claim.attempt_token),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("email claim is no longer owned")
@@ -144,8 +153,8 @@ class ColdEmailQueue:
         with self._connect() as db:
             updated = db.execute(
                 """UPDATE cold_email_sends SET status=?,error=?,next_attempt_at=?,updated_at=?,
-                     lease_expires_at=NULL WHERE id=? AND status='sending' AND claimed_by=?""",
-                (status, error[:300], next_attempt, ts, claim.id, claim.worker_id),
+                     lease_expires_at=NULL WHERE id=? AND status='sending' AND claimed_by=? AND attempt_token=?""",
+                (status, error[:300], next_attempt, ts, claim.id, claim.worker_id, claim.attempt_token),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("email claim is no longer owned")
@@ -158,8 +167,8 @@ class ColdEmailQueue:
         with self._connect() as db:
             updated = db.execute(
                 """UPDATE cold_email_sends SET status='unknown',error=?,updated_at=?,
-                     lease_expires_at=NULL WHERE id=? AND status='sending' AND claimed_by=?""",
-                (error[:300], ts, claim.id, claim.worker_id),
+                     lease_expires_at=NULL WHERE id=? AND status='sending' AND claimed_by=? AND attempt_token=?""",
+                (error[:300], ts, claim.id, claim.worker_id, claim.attempt_token),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("email claim is no longer owned")
@@ -219,6 +228,8 @@ class ColdEmailSender:
             return "queue_empty"
         self.journal.append("claimed", send_id=claim.id, contact_id=claim.contact_id)
         try:
+            from workflow.farm_control import require_can_send
+            require_can_send('email')
             provider_id = self.provider.send(to=claim.to, subject=claim.subject, body=claim.body)
         except Exception as exc:
             code = type(exc).__name__.lower()

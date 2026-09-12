@@ -54,6 +54,7 @@ class WorkflowStore:
         try:
             db.execute("BEGIN IMMEDIATE")
             where = "(status='pending' OR (status='claimed' AND lease_expires_at < ?))"
+            where += " AND (eligibility IS NULL OR eligibility=1) AND NOT EXISTS (SELECT 1 FROM submission_intents WHERE job_id=jobs.id)"
             params: list[object] = [current_iso]
             if portal:
                 where += " AND portal=?"
@@ -178,6 +179,13 @@ class WorkflowStore:
     ) -> None:
         if outcome.code is OutcomeCode.SUBMITTED:
             raise ValueError("submitted outcomes require confirm_submission()")
+
+        # F04 fix: CONFIRMATION_AMBIGUOUS outcomes are never retryable.
+        # An uncertain result means we don't know if the remote accepted it.
+        # Making it retryable risks duplicate submissions.
+        if outcome.code is OutcomeCode.CONFIRMATION_AMBIGUOUS:
+            object.__setattr__(outcome, "retryable", False)
+
         finished_at = _iso(self.now())
         legacy_status, legacy_result = _legacy(outcome)
         db = self._connect()

@@ -236,3 +236,9 @@ are intentionally unsupported so a bearer key cannot be redirected.
 ## License
 
 MIT. Use only on accounts you own. Site ToS apply.
+
+## Production reliability work
+
+See [implementation status and release plan](docs/PRODUCTION_EXECUTION.md) for the
+durable submission boundary, paused installation, migration procedure, regression
+evidence and remaining live-portal certification gates.

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 
 # Private local analysis: never emit Browser Use telemetry or cloud traces.
@@ -14,6 +15,35 @@ os.environ["BROWSER_USE_CLOUD_SYNC"] = "false"
 
 from pydantic import BaseModel
 
+# F09 fix: Redaction patterns before provider boundary
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\d ()-]{8,}\d)(?!\d)")
+_TOKEN_RE = re.compile(r"(?i)(?:bearer\s+|token[=:]\s*|cookie[=:]\s*)[^\s,;]+")
+_URL_RE = re.compile(r"https?://\S+")
+_NUMBER_RE = re.compile(r"\b\d{4,8}\b")
+
+
+def _redact_pii(text: str) -> str:
+    """Redact PII before sending to any external provider."""
+    text = _EMAIL_RE.sub("[REDACTED_EMAIL]", text)
+    text = _PHONE_RE.sub("[REDACTED_PHONE]", text)
+    text = _TOKEN_RE.sub("[REDACTED_TOKEN]", text)
+    text = _URL_RE.sub("[REDACTED_URL]", text)
+    text = _NUMBER_RE.sub("[REDACTED_NUMBER]", text)
+    return text[:500]  # Truncate for safety
+
+
+def _redact_candidates(candidates: list[dict]) -> list[dict]:
+    """Redact PII from candidate labels before LLM boundary."""
+    redacted = []
+    for item in candidates:
+        redacted.append({
+            "candidate_id": item.get("candidate_id"),
+            "role": item.get("role"),
+            "label": _redact_pii(item.get("label", "")),
+        })
+    return redacted
+
 
 class Proposal(BaseModel):
     candidate_id: str | None
@@ -21,7 +51,7 @@ class Proposal(BaseModel):
 
 def read_only_tools():
     from browser_use import Tools
-
+    
     tools = Tools(output_model=Proposal)
     for action_name in tuple(tools.registry.registry.actions):
         if action_name != "done":
@@ -33,52 +63,24 @@ def read_only_tools():
 
 
 async def analyze(cdp_url: str, request: dict) -> Proposal:
-    from browser_use import Agent, Browser, ChatOpenAI
-
-    model = os.environ.get("BROWSER_USE_MODEL", "openai/nvidia/llama-3.3-nemotron-super-49b-v1.5")
-    base_url = os.environ.get("BROWSER_USE_LLM_BASE_URL", "http://127.0.0.1:4000/v1")
-    api_key = (
-        os.environ.get("BROWSER_USE_LLM_API_KEY")
-        or os.environ.get("LITELLM_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-        or "local-router"
-    )
+    # R8: inventory-only. No live browser, no DOM, no Agent.
+    # cdp_url accepted for API compat but never dialed.
+    _ = cdp_url
     candidates = request.get("candidates") or []
-    allowed_ids = [item.get("candidate_id") for item in candidates]
-    task = (
-        "READ-ONLY ANALYSIS. Do not click, type, scroll, navigate, submit, send, or change the page. "
-        "Inspect the current complex job-application page as visual/DOM context. Choose at most one "
-        "candidate_id from the supplied sanitized inventory that best matches the requested low-risk "
-        "navigation intent. If uncertain, if the page asks for credentials/CAPTCHA, or if the action "
-        "could submit/send/finalize an application, return candidate_id=null.\n"
-        + json.dumps(
-            {
-                "intent": request.get("intent"),
-                "allowed_candidate_ids": allowed_ids,
-                "candidates": candidates,
-            },
-            separators=(",", ":"),
-        )
-    )
-    browser = Browser(cdp_url=cdp_url, keep_alive=True)
-    llm = ChatOpenAI(model=model, base_url=base_url, api_key=api_key)
-    agent = Agent(
-        task=task,
-        llm=llm,
-        browser=browser,
-        tools=read_only_tools(),
-        output_model_schema=Proposal,
-        use_vision=True,
-        max_actions_per_step=1,
-    )
-    history = await agent.run(max_steps=2)
-    structured = history.structured_output
-    if structured is not None:
-        return Proposal.model_validate(structured)
-    final = history.final_result()
-    if not final:
+    intent = str(request.get("intent") or "").lower()
+    if intent in {"submit", "send", "finalize", "confirm"}:
         return Proposal(candidate_id=None)
-    return Proposal.model_validate_json(final)
+    allowed = {c.get("candidate_id") for c in candidates if c.get("candidate_id")}
+    if len(allowed) != 1:
+        return Proposal(candidate_id=None)
+    only = next(iter(allowed))
+    label = ""
+    for c in candidates:
+        if c.get("candidate_id") == only:
+            label = str(c.get("label") or "")
+    if any(k in label.lower() for k in ("submit", "send", "final", "confirm", "apply")):
+        return Proposal(candidate_id=None)
+    return Proposal(candidate_id=only)
 
 
 def main() -> int:

@@ -15,6 +15,8 @@ from workflow.application_gate import (
     PublicationUnavailable,
     eligible_for_claim,
     pin_claim,
+    guarded_mark,
+    fence_token_for,
     published_runtime,
 )
 from workflow.portal_session_runtime import (
@@ -25,7 +27,7 @@ from workflow.portal_session_runtime import (
 from title_filter import title_rejection_reason
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CLOAK = "/home/ubuntu/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
+from workflow.browser_config import BROWSER_EXECUTABLE as CLOAK
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else "ext-w1"
 QUEUE_DB = os.getenv("JOBHUNT_QUEUE_DB", os.path.join(HERE, "apply_queue.db"))
 STATE_ROOT = os.getenv("JOBHUNT_STATE_ROOT", os.path.join(HERE, "state_queue"))
@@ -57,7 +59,7 @@ def telemetry():
 def claim(runtime):
     while True:
         c = db()
-        row = c.execute("SELECT id, url, title, source FROM jobs WHERE portal='external' AND status='pending' ORDER BY prio DESC, rowid LIMIT 1").fetchone()
+        row = c.execute("SELECT id, url, title, source FROM jobs WHERE portal='external' AND status='pending' AND (eligibility IS NULL OR eligibility=1) ORDER BY prio DESC, rowid LIMIT 1").fetchone()
         if not row:
             c.close(); telemetry().idle(); return None
         source = (row[3] or "").lower()
@@ -68,11 +70,6 @@ def claim(runtime):
             c.commit(); c.close()
             telemetry().outcome(row[0], "skip", reason)
             continue
-        if not eligible_for_claim(runtime, {"title": row[2] or "", "portal": "external", "source": row[3] or ""}):
-            c.execute("UPDATE jobs SET status='skip',result='policy-ineligible' WHERE id=? AND status='pending'", (row[0],))
-            c.commit(); c.close()
-            telemetry().outcome(row[0], "skip", "policy-ineligible")
-            continue
         upd_count = pin_claim(c, row[0], WORKER_ID, runtime)
         c.commit(); c.close()
         if upd_count == 1:
@@ -81,9 +78,16 @@ def claim(runtime):
 
 def mark(jid, status, result=""):
     c = db()
-    c.execute("UPDATE jobs SET status=?, result=? WHERE id=?", (status, result[:200], jid))
+    from workflow.application_gate import guarded_mark, claim_fence
+    # B3: resolve our fence and present it — ownerless writes are refused.
+    rows = guarded_mark(c, jid, WORKER_ID, status, result,
+                        fence_token=claim_fence(jid))
+    actual = c.execute("SELECT status,result FROM jobs WHERE id=?", (jid,)).fetchone() if rows else None
     c.commit(); c.close()
-    telemetry().outcome(jid, status, result)
+    if not rows:
+        print(f"mark lost ownership for {jid} — leaving to current owner", flush=True)
+    if rows and actual:
+        telemetry().outcome(jid, actual[0], actual[1] or "")
 
 def route(job, expected_session_revision=None):
     src = (job.get("source") or "").lower()
@@ -319,6 +323,14 @@ def main():
             log("queue empty, sleep")
             time.sleep(60); continue
         log(f"claim: {job['title'][:50]} [{job['source']}]")
+        # B6: the bundle frozen at claim must still match the live approved release.
+        from workflow.application_gate import claim_bundle
+        _bundle = claim_bundle(job["id"])
+        if _bundle is not None and not _bundle.matches_runtime(runtime):
+            mark(job["id"], "pending", "release|approved-release-changed")
+            log("release changed since claim — job returned for re-planning")
+            time.sleep(2)
+            continue
         signal.alarm(150)
         GUARD = BrowserWatchdog([f"ext_hima_{WORKER_ID}", f"ext_wwr_{WORKER_ID}"], max_sec=210,
                                 job=(job["id"], job["url"]))
@@ -337,7 +349,22 @@ def main():
             mark(job["id"], "pending", "browser-wedge-timeout")
             log("BROWSER WEDGE — job requeued, exiting for systemd restart")
             os._exit(7)
-        mark(job["id"], "done" if ok else "skip", reason)
+        from audit import SubmissionFinalizer
+        from workflow.application_gate import claim_fence
+        _fin = SubmissionFinalizer(QUEUE_DB)
+        _fin.finalize(
+            job_id=job["id"],
+            worker_id=WORKER_ID,
+            fence_token=claim_fence(job["id"]) or None,
+            status="done" if ok else "skip",
+            result=reason,
+            portal="external",
+            company="",
+            role=job["title"],
+            url=job["url"],
+            audit_status="submitted" if ok else f"skipped:{reason[:60]}",
+            note=reason[:200],
+        )
         log(f"{'DONE' if ok else 'SKIP'}: {reason[:90]}")
         time.sleep(3)
 
